@@ -26,3 +26,7 @@ build/
 .claude/projects/
 .claude/todos/
 .claude/shistory/
+
+# Spec Kit catalog caches (regenerated locally)
+.specify/extensions/.cache/
+.specify/integrations/.cache/
