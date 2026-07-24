@@ -19,3 +19,10 @@ build/
 .idea/
 .vscode/
 .DS_Store
+
+# Claude Code credentials / local state (skills/ are tracked on purpose)
+.claude/.credentials.json
+.claude/settings.local.json
+.claude/projects/
+.claude/todos/
+.claude/shistory/
