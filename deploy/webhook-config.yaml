@@ -1,0 +1,5 @@
+# ValidatingWebhookConfiguration registering the admission webhook.
+#
+# Placeholder — the full manifest (failurePolicy: Fail, sideEffects: None,
+# timeoutSeconds: 5, pod CREATE+UPDATE rules, namespaceSelector exclusions)
+# lands in Phase 6, task T039.
