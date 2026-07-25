@@ -12,14 +12,18 @@ ensures scheduled workloads do not exceed a configurable capacity percentage.
 
 This repository uses **GitHub Spec Kit** with a deliberate two-agent split:
 
-| Phase | Agent | Machine |
-|-------|-------|---------|
-| Constitution, Clarify, Specify, Plan | Hermes Agent | Windows (planning) |
-| Tasks, Implement (coding, testing) | **Claude Code (you)** | VM (this machine) |
+| Phase | Agent | Role |
+|-------|-------|------|
+| Constitution, Clarify, Specify, Plan | Hermes Agent | Planning |
+| Tasks, Implement (coding, testing) | **Claude Code (you)** | Implementation |
+
+> Machine-specific layout is intentionally **not** recorded in this repo. Work
+> from the clone wherever it lives on this host; the repo contains no
+> host-specific paths.
 
 You are the **implementation agent**. The specification, plan, and constitution
-are produced upstream by Hermes on Windows and arrive here via `git`. Your job
-is to turn the plan into code: `/speckit-tasks` then `/speckit-implement`.
+are produced upstream by Hermes and arrive here via `git`. Your job is to turn
+the plan into code: `/speckit-tasks` then `/speckit-implement`.
 
 ### How to run an implementation phase
 
@@ -35,5 +39,5 @@ surface it as a question rather than inventing scope.
 
 ### Script type
 
-Spec Kit scripts in this repo are **bash** (`--script sh`), appropriate for
-this Linux VM. Run them from the project root with `bash .specify/scripts/bash/...`.
+Spec Kit scripts in this repo are **bash** (`--script sh`). Run them from the
+project root with `bash .specify/scripts/bash/...`.

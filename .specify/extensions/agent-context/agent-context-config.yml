@@ -12,9 +12,9 @@ context_file: ""
 #   - AGENTS.md
 #   - CLAUDE.md
 #
-# Dual-agent setup: AGENTS.md is read by Hermes (specification/planning on
-# Windows), CLAUDE.md is read by Claude Code (implementation on the VM).
-# Both are kept in sync with the current plan by this extension.
+# Dual-agent setup: AGENTS.md is read by Hermes (specification/planning),
+# CLAUDE.md is read by Claude Code (implementation). Both are kept in sync
+# with the current plan by this extension.
 context_files:
   - AGENTS.md
   - CLAUDE.md
