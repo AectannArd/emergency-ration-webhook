@@ -1,27 +1,36 @@
 <!--
 === Sync Impact Report ===
-Version change: 1.3.0 → 1.4.0 (MINOR — new Principle VIII: Test-First Development)
+Version change: 1.4.0 → 2.0.0 (MAJOR — Principle V redefined: single-webhook → 3-component operator)
   Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
   Prior: 1.0.0 → 1.1.0 (Principle VI added, 2026-07-25)
   Prior: 1.1.0 → 1.2.0 (Principle VII added, 2026-07-25)
   Prior: 1.2.0 → 1.3.0 (integration test framework locked + deferred detail ported)
+  Prior: 1.3.0 → 1.4.0 (Principle VIII: Test-First Development)
 Modified principles (vs remote v1.0.0):
   - II. Fail-Safe by Design → I. Fail-Closed by Default (NON-NEGOTIABLE).
+  - V. Simplicity and YAGNI → V. Separated Concerns, Minimal Surface (NON-NEGOTIABLE).
+    The single-webhook model is replaced by a 3-component operator architecture
+    (Node Capacity Controller + Allocation Controller + Admission Webhook),
+    linked by CRDs as shared state. The 'no CRDs for v1' constraint is lifted.
+    Rationale: node lifecycle and pod lifecycle are independent processes with
+    different risk profiles; conflating them couples what should be separated.
+    This is a MAJOR bump because Principle V was NON-NEGOTIABLE and its core
+    stance (single component, no CRDs) is redefined.
 Added principles:
-  - v1.0.0: Principles I–V (initial ratification; renamed/reordered here)
+  - v1.0.0: Principles I–IV (initial ratification; renamed/reordered here)
   - v1.1.0: VI — Integration Test Coverage of Main and Exceptional Workflows
   - v1.2.0: VII — Kubernetes Version Support Window (N-2)
-  - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE). Restores the strict
-    TDD discipline (Red-Green-Refactor) that remote v1.0.0 had under "Test
-    Discipline" and that the v1.2.0 consolidation weakened to "test required".
+  - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE)
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
     Security/RBAC model.
-  - Development Workflow: added quality-gate detail.
-Modified in v1.4.0:
-  - Development Workflow: "Tests required" → "Test-first (TDD)" — tests written
-    BEFORE implementation, RED-GREEN-REFACTOR strictly enforced.
+Modified in v2.0.0:
+  - Principle V: rewritten — 3-component operator architecture, CRDs allowed.
+  - Technology Constraints: Kubernetes surface now includes CRDs; Configuration
+    via CRD spec; Capacity inputs sourced via controllers.
+  - Principle VI: envtest rejection rationale updated (was 'Principle V grounds',
+    now just 'Go toolchain cost').
 Added sections (cumulative):
   - Core Principles I–VIII
   - Technology Constraints
@@ -103,21 +112,40 @@ first-class observability events.
 - Rationale: a capacity controller that cannot explain its own decisions cannot
   be trusted in production or debugged during an incident.
 
-### V. Simplicity and YAGNI
+### V. Separated Concerns, Minimal Surface (NON-NEGOTIABLE)
 
-Start with the minimum that enforces the budget correctly: a single
-ValidatingWebhook, synchronous capacity check, one config source. Add
-complexity (mutating webhooks, multiple budgets, caching layers, custom
-exceptions) only when a concrete, evidence-backed need appears.
+The capacity guardian separates two independent cluster processes — node
+lifecycle (capacity supply) and pod lifecycle (capacity consumption) — into
+distinct components linked by CRDs as shared state. Each component has a single
+responsibility; complexity is only added where it separates a real concern.
 
-- One resource-accounting model, one enforcement policy, one webhook type
-  (Validating) unless a requirement forces otherwise.
-- Configuration via ConfigMap and/or flags; no database, no CRDs for v1.
+- **Three components, each with one job:**
+  1. **Node Capacity Controller** — watches nodes, publishes cumulative cluster
+     capacity (sum of `.status.allocatable`) in a CRD `status`. Read-only on
+     nodes; never interrupts the node lifecycle (draining is an operator
+     decision, not the webhook's).
+  2. **Allocation Controller** — watches the Node Capacity CRD + pod resource
+     requests, computes current allocation percentage (in CRD `status`), holds
+     the target allocation threshold (in CRD `spec`). Tracks pod
+     CREATE + UPDATE + DELETE to keep allocation accurate.
+  3. **Admission Webhook** — reads the Allocation CRD (`spec` threshold +
+     `status` allocation) to admit/deny new pods against remaining budget.
+     Tracks pod CREATE + UPDATE.
+- **CRDs are the data link between components**, not a database — they carry
+  controller-computed status, not user-facing CRUD.
+- **Within each component, apply YAGNI ruthlessly**: one resource-accounting
+  model, one enforcement policy, one webhook type (Validating). Configuration
+  via the Allocation CRD `spec` and/or flags; no external database.
 - Prefer standard Kubernetes types and stable APIs over alpha/custom resources
   unless the stable surface is provably insufficient.
-- Complexity MUST be justified in the plan's Complexity Tracking table.
-- Rationale: admission webhooks sit on the critical path of every deploy;
-  unnecessary surface area is unnecessary risk.
+- Complexity beyond this 3-component split (mutating webhooks, multiple budgets,
+  caching layers, per-node partitioning) MUST be justified in the plan's
+  Complexity Tracking table.
+- Rationale: conflating node lifecycle and pod lifecycle in one component
+  couples two processes with different risk profiles. Separating them via CRDs
+  makes each independently testable (Principle VI) and independently failureable
+  (Principle I), while the minimal-surface discipline prevents scope creep within
+  each component.
 
 ### VI. Integration Test Coverage of Main and Exceptional Workflows
 
@@ -136,7 +164,7 @@ decision logic.
   flow. The default integration test path uses `tower-test` to mock the
   kube-apiserver as a `tower::Service`, feeding scripted AdmissionReview
   request/response scenarios through the webhook. This avoids a Go toolchain
-  dependency (rejecting `kube-rs/envtest` on Principle V grounds) while keeping
+  dependency (Go toolchain cost) while keeping
   tests fast and isolated. E2E coverage on CI uses a `k3d`/`kind` cluster.
 - BDD structure: integration tests SHOULD be organised as Gherkin `.feature`
   files executed via `cucumber-rs` (Given/When/Then against a mocked apiserver
@@ -199,14 +227,18 @@ written to pass them. Red-Green-Refactor is strictly enforced.
 - **Runtime target**: Linux container, deployed as a Kubernetes workload
   (`Deployment` behind a `Service`, served over HTTPS; DaemonSet is an
   alternative to be settled in the plan).
-- **Kubernetes surface**: ValidatingWebhookConfiguration (v1). No MutatingWebhook
-  in scope for v1.
-- **Capacity inputs**: cluster node capacity (`.status.allocatable`) and
-  resource requests/limits from the Kubernetes API. Source of capacity *usage*
-  (live metrics vs. declared requests) to be resolved in clarification/plan.
-- **Configuration**: the capacity percentage ceiling and webhook settings MUST
-  be configurable via standard Kubernetes mechanisms (ConfigMap / flags / env),
-  not compiled in.
+- **Kubernetes surface**: ValidatingWebhookConfiguration (v1) + two CRDs
+  (ClusterCapacity, Allocation). No MutatingWebhook in scope.
+- **Architecture**: 3-component operator — Node Capacity Controller,
+  Allocation Controller, Admission Webhook — linked by CRDs as shared state
+  (see Principle V for the data-flow diagram and component responsibilities).
+- **Capacity inputs**: cluster node capacity (`.status.allocatable`) aggregated
+  by the Node Capacity Controller into a CRD; pod resource requests summed by
+  the Allocation Controller. Source of capacity *usage* = declared pod
+  `resources.requests` (resolved in clarification — deterministic, consistent
+  with kube-scheduler, no metrics-server dependency).
+- **Configuration**: the target allocation threshold lives in the Allocation
+  CRD `spec`; webhook settings via flags/env. Not compiled in.
 - **Primary dependencies**: async runtime (`tokio`), HTTP/TLS server
   (`axum`/`hyper` + `rustls`), Kubernetes client/informer (`kube-rs`),
   `serde` for serialising admission objects, `tracing` for structured logs,
@@ -263,4 +295,4 @@ written to pass them. Red-Green-Refactor is strictly enforced.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 1.4.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 2.0.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
