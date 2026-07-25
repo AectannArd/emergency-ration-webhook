@@ -49,6 +49,13 @@ components:
 - Validates a new Pod against the remaining budget.
 - Tracks pod **CREATE + UPDATE**.
 
+### Deployment Topology
+- **Single binary, three roles.** All three components (Node Capacity Controller,
+  Allocation Controller, Admission Webhook) run as async tasks within one
+  process, deployed as one `Deployment`. CRDs are the internal data contract.
+  Horizontal scaling via stateless replicas. Splitting into separate binaries
+  is a future concern if a component needs independent scaling.
+
 Data flow:
 
 ```
