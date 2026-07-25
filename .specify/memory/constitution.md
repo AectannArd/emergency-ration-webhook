@@ -1,25 +1,29 @@
 <!--
 === Sync Impact Report ===
-Version change: 1.2.0 → 1.3.0 (MINOR — integration test framework locked + deferred detail ported)
+Version change: 1.3.0 → 1.4.0 (MINOR — new Principle VIII: Test-First Development)
   Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
   Prior: 1.0.0 → 1.1.0 (Principle VI added, 2026-07-25)
   Prior: 1.1.0 → 1.2.0 (Principle VII added, 2026-07-25)
+  Prior: 1.2.0 → 1.3.0 (integration test framework locked + deferred detail ported)
 Modified principles (vs remote v1.0.0):
   - II. Fail-Safe by Design → I. Fail-Closed by Default (NON-NEGOTIABLE).
-    Remote v1.0.0 set a provisional fail-open default pending /speckit-clarify.
-    The owner has now decided: fail-closed is the non-negotiable default.
 Added principles:
   - v1.0.0: Principles I–V (initial ratification; renamed/reordered here)
   - v1.1.0: VI — Integration Test Coverage of Main and Exceptional Workflows
   - v1.2.0: VII — Kubernetes Version Support Window (N-2)
+  - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE). Restores the strict
+    TDD discipline (Red-Green-Refactor) that remote v1.0.0 had under "Test
+    Discipline" and that the v1.2.0 consolidation weakened to "test required".
 Modified in v1.3.0:
-  - Principle VI: integration test framework selection locked (tower-test mocks
-    + cucumber-rs BDD; kube-rs/envtest rejected on Go-toolchain grounds).
+  - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
-    Security/RBAC model (ported from superseded v1.0.0).
-  - Development Workflow: added quality-gate detail (mocks as default test path).
+    Security/RBAC model.
+  - Development Workflow: added quality-gate detail.
+Modified in v1.4.0:
+  - Development Workflow: "Tests required" → "Test-first (TDD)" — tests written
+    BEFORE implementation, RED-GREEN-REFACTOR strictly enforced.
 Added sections (cumulative):
-  - Core Principles I–VII
+  - Core Principles I–VIII
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -28,7 +32,7 @@ Templates requiring updates:
   - .specify/templates/plan-template.md — ✅ no change needed
   - .specify/templates/spec-template.md — ✅ no change needed
   - .specify/templates/tasks-template.md — ✅ no change needed
-Follow-up TODOs: none (v1.3.0 resolves the deferred SLO/deps/security port).
+Follow-up TODOs: none.
 === Sync Impact Report End ===
 -->
 
@@ -159,6 +163,34 @@ current release plus the two preceding — i.e. N, N-1, N-2).
   admission webhook that only runs on the latest version is a forced upgrade
   dependency. N-2 is the standard community support window.
 
+### VIII. Test-First Development (NON-NEGOTIABLE)
+
+Development is test-first (TDD), not merely test-required. Tests are written
+BEFORE implementation and watched to fail; only then is the minimal code
+written to pass them. Red-Green-Refactor is strictly enforced.
+
+- **RED**: write one minimal test describing the next behaviour. Run it and
+  WATCH it fail — for the right reason (feature missing), not a typo or compile
+  error. A test that passes immediately tests nothing.
+- **GREEN**: write the minimal code to pass the test. Nothing more — no extra
+  features, no refactors, no "improvements." Hardcoded returns and duplication
+  are acceptable here.
+- **REFACTOR**: only after green, clean up — remove duplication, improve names,
+  simplify — while keeping tests green.
+- **Iron Law**: no production code without a failing test first. Code written
+  before its test MUST be deleted and reimplemented from the test, not
+  "adapted" or kept "as reference."
+- **Vertical slices, not horizontal**: one RED→GREEN→REFACTOR cycle per
+  behaviour, end-to-end. Do NOT write a pile of tests then a pile of
+  implementation — tests designed before the implementation teaches the
+  interface become brittle.
+- This applies to integration tests (Principle VI) too: the integration test
+  for a workflow is written first and watched to fail, then the workflow is
+  implemented to pass it.
+- Rationale: tests written after code pass immediately and prove nothing — they
+  are biased by the implementation and miss the edge cases you forgot. Seeing
+  the test fail is the only proof it actually tests something.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -201,13 +233,17 @@ current release plus the two preceding — i.e. N, N-1, N-2).
   on the planning host; implementation (tasks, implement, test) is delegated to
   the coding agent on the build host. The git repository is the sync mechanism —
   planning commits are pulled before implementation begins.
-- **Tests required**: the admission decision logic MUST have unit tests covering
-  admit, reject, and every enumerated failure-mode path from Principle III
-  before it is considered done. Capacity budget arithmetic MUST be tested at
-  boundaries (exactly at ceiling, one unit over, zero remaining).
+- **Test-first (TDD)**: development follows strict Red-Green-Refactor
+  (Principle VIII). The admission decision logic MUST have unit tests covering
+  admit, reject, and every enumerated failure-mode path from Principle III;
+  these tests are written FIRST, watched to fail, then implemented. Capacity
+  budget arithmetic MUST be tested at boundaries (exactly at ceiling, one unit
+  over, zero remaining). Integration tests (Principle VI) are likewise written
+  before the workflow they cover.
 - **Quality gate**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo
   test` (unit + integration) all green before merge. No admission-core change
-  lands without a covering test.
+  lands without a covering test, and no production code lands without a failing
+  test first.
 - **Integration test default**: the mocked-apiserver path (`tower-test`) is the
   default test target for `cargo test`; E2E tests run on CI against a `k3d`
   cluster and are marked `#[ignore]` so they do not run on a plain `cargo test`.
@@ -227,4 +263,4 @@ current release plus the two preceding — i.e. N, N-1, N-2).
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 1.3.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 1.4.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
