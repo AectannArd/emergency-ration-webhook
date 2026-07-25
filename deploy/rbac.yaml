@@ -1,0 +1,60 @@
+# Least-privilege RBAC for the capacity admission webhook (T023).
+#
+# Per contracts/clustercapacity-crd.md + allocation-crd.md §RBAC:
+#   - Node Capacity Controller: get/list/watch nodes; update/patch
+#     clustercapacities/status.
+#   - Allocation Controller: get/list/watch pods + clustercapacities;
+#     update/patch allocations/status.
+#   - Admission Webhook: get/list/watch allocations (its read-only cache).
+# No write access to nodes or pods — the webhook never interrupts either
+# lifecycle (Constitution Principle V).
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capacity-admission-webhook
+  namespace: capacity-admission
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capacity-admission-webhook
+rules:
+  # Capacity supply: observe nodes (read-only).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Capacity demand: observe pod resource requests (read-only).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # ClusterCapacity CRD: read supply; write controller-computed status.
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["clustercapacities"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["clustercapacities/status"]
+    verbs: ["get", "update", "patch"]
+  # Allocation CRD: read budget + write controller-computed status.
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["allocations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["allocations/status"]
+    verbs: ["get", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: capacity-admission-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: capacity-admission-webhook
+subjects:
+  - kind: ServiceAccount
+    name: capacity-admission-webhook
+    namespace: capacity-admission

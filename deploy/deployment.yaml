@@ -1,0 +1,4 @@
+# Deployment + Service for the capacity admission webhook.
+#
+# Placeholder — the full manifest (2 replicas, resource requests < 256Mi/< 500m,
+# TLS volume mounts) lands in Phase 6, task T038. Namespace: capacity-admission.

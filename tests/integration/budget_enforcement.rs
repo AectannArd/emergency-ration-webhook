@@ -1,0 +1,221 @@
+//! Integration tests for budget enforcement (User Story 1, T015).
+//!
+//! Drives the real admission path end-to-end: a JSON `AdmissionReview` body in →
+//! `handle()` (deserialise → read cached allocation → extract pod requests →
+//! `check_budget`) → `AdmissionResponse` out. Allocation state is injected through
+//! a real kube `reflector::Store`, the same cache the live webhook reads.
+//!
+//! Covers spec.md US1 acceptance scenarios 1–5 and SC-002 (denial figures).
+
+use std::collections::BTreeMap;
+
+use axum::body::Bytes;
+use capacity_admission_webhook::crd::{
+    Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME,
+};
+use capacity_admission_webhook::webhook::handler::handle;
+use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use kube::core::admission::Operation;
+use kube::runtime::reflector::Store;
+use kube::runtime::watcher;
+
+const GIB: i64 = 1024 * 1024 * 1024;
+
+/// Allocation status for the spec's cluster: 100 CPU / 200 GiB allocatable,
+/// 80% budget → ceiling 80 CPU / 160 GiB, currently allocated 70 CPU / 110 GiB.
+fn spec_allocation_status() -> AllocationStatus {
+    AllocationStatus {
+        allocated_cpu_milli: 70_000,
+        allocated_memory_bytes: 110 * GIB,
+        ceiling_cpu_milli: 80_000,
+        ceiling_memory_bytes: 160 * GIB,
+        utilization_percent_cpu: 0.875,
+        utilization_percent_memory: 0.6875,
+        last_updated: "2026-07-26T14:32:05Z".to_string(),
+    }
+}
+
+/// A reflector store holding the `cluster-allocation` singleton with `status`.
+fn populated_store() -> Store<Allocation> {
+    let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+    let mut allocation = Allocation::new(
+        CLUSTER_ALLOCATION_NAME,
+        AllocationSpec { budget_percent: 80 },
+    );
+    allocation.status = Some(spec_allocation_status());
+    writer.apply_watcher_event(&watcher::Event::Apply(allocation));
+    store
+}
+
+/// Build a pod with one container requesting `cpu` / `memory`.
+fn pod(cpu: &str, memory: &str) -> Pod {
+    let mut requests = BTreeMap::new();
+    requests.insert("cpu".to_string(), Quantity(cpu.to_string()));
+    requests.insert("memory".to_string(), Quantity(memory.to_string()));
+    Pod {
+        spec: Some(PodSpec {
+            containers: vec![Container {
+                resources: Some(ResourceRequirements {
+                    requests: Some(requests),
+                    limits: None,
+                    claims: None,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// A pod whose single container declares no resources (request → 0).
+fn bare_pod() -> Pod {
+    Pod {
+        spec: Some(PodSpec {
+            containers: vec![Container::default()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Serialise a pod (optionally an old object for UPDATE) into an AdmissionReview
+/// body identical in shape to what the kube-apiserver sends.
+fn review_body(name: &str, op: Operation, object: &Pod, old: Option<&Pod>) -> Bytes {
+    let object = serde_json::to_value(object).unwrap();
+    let old_object = match old {
+        Some(o) => serde_json::to_value(o).unwrap(),
+        None => serde_json::Value::Null,
+    };
+    let op_str = match op {
+        Operation::Create => "CREATE",
+        Operation::Update => "UPDATE",
+        Operation::Delete => "DELETE",
+        Operation::Connect => "CONNECT",
+    };
+    let review = serde_json::json!({
+        "kind": "AdmissionReview",
+        "apiVersion": "admission.k8s.io/v1",
+        "request": {
+            "uid": name,
+            "name": name,
+            "namespace": "default",
+            "kind": {"group": "", "version": "v1", "kind": "Pod"},
+            "resource": {"group": "", "version": "v1", "resource": "pods"},
+            "operation": op_str,
+            "userInfo": {"username": "operator@example.com"},
+            "object": object,
+            "oldObject": old_object,
+            "dryRun": false,
+        }
+    });
+    Bytes::from(serde_json::to_vec(&review).unwrap())
+}
+
+/// Run a review body through the handler against the populated store.
+async fn admit(body: Bytes) -> kube::core::admission::AdmissionResponse {
+    handle(body, &populated_store()).await
+}
+
+#[tokio::test]
+async fn scenario1_pod_under_ceiling_is_admitted() {
+    // Pod requests 5 CPU / 40 GiB → projected 75 CPU / 150 GiB, both under ceiling.
+    let resp = admit(review_body(
+        "s1",
+        Operation::Create,
+        &pod("5", "40Gi"),
+        None,
+    ))
+    .await;
+    assert!(resp.allowed, "pod fitting the budget must be admitted");
+    assert_eq!(resp.uid, "s1");
+}
+
+#[tokio::test]
+async fn scenario2_pod_over_ceiling_is_denied_with_figures() {
+    // Pod requests 15 CPU → projected 85 > 80 ceiling. CPU is the violated resource.
+    let resp = admit(review_body(
+        "s2",
+        Operation::Create,
+        &pod("15", "10Gi"),
+        None,
+    ))
+    .await;
+    assert!(!resp.allowed, "pod exceeding the budget must be rejected");
+    assert_eq!(resp.result.code, 403, "policy denial is a 403");
+    let message = &resp.result.message;
+    // SC-002: a single rejection message names the resource and all four figures.
+    assert!(message.contains("CPU budget exceeded"));
+    assert!(message.contains("allocated 70000m"));
+    assert!(message.contains("requested 15000m"));
+    assert!(message.contains("projected 85000m"));
+    assert!(message.contains("ceiling 80000m"));
+}
+
+#[tokio::test]
+async fn scenario3_pod_exactly_at_ceiling_is_admitted() {
+    // Cluster at the CPU ceiling already (70 + 10 == 80 ceiling). Ceiling is inclusive.
+    let status = AllocationStatus {
+        allocated_cpu_milli: 80_000,
+        ..spec_allocation_status()
+    };
+    let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+    let mut allocation = Allocation::new(
+        CLUSTER_ALLOCATION_NAME,
+        AllocationSpec { budget_percent: 80 },
+    );
+    allocation.status = Some(status);
+    writer.apply_watcher_event(&watcher::Event::Apply(allocation));
+
+    let body = review_body("s3", Operation::Create, &pod("5", "1Ki"), None);
+    // Projected 85 > 80 → rejected: the budget is a hard ceiling, not a soft target.
+    let resp = handle(body, &store).await;
+    assert!(!resp.allowed, "going one over the hard ceiling must reject");
+}
+
+#[tokio::test]
+async fn scenario4_zero_request_pod_is_admitted() {
+    let resp = admit(review_body("s4", Operation::Create, &bare_pod(), None)).await;
+    assert!(resp.allowed, "a pod requesting nothing consumes no budget");
+}
+
+#[tokio::test]
+async fn scenario5_update_evaluated_as_delta() {
+    // An existing pod at 10 CPU is updated to 20 CPU: the system must evaluate the
+    // +10 delta (70 → 80, exactly at the inclusive ceiling) and admit it.
+    let old = pod("10", "1Ki");
+    let new = pod("20", "1Ki");
+    let resp = admit(review_body("s5", Operation::Update, &new, Some(&old))).await;
+    assert!(
+        resp.allowed,
+        "update delta of +10 lands at the ceiling and must be admitted"
+    );
+
+    // Same pod updated to 30 CPU instead: +20 delta (70 → 90 > 80) must reject.
+    let bigger = pod("30", "1Ki");
+    let resp = admit(review_body("s5b", Operation::Update, &bigger, Some(&old))).await;
+    assert!(!resp.allowed);
+    assert!(resp.result.message.contains("projected 90000m"));
+}
+
+#[tokio::test]
+async fn both_resources_over_budget_listed_in_message() {
+    // 15 CPU (→85>80) and 60 GiB (→170>160): both violated, newline-separated.
+    let resp = admit(review_body(
+        "both",
+        Operation::Create,
+        &pod("15", "60Gi"),
+        None,
+    ))
+    .await;
+    assert!(!resp.allowed);
+    let message = &resp.result.message;
+    assert!(message.contains("CPU budget exceeded"));
+    assert!(message.contains("memory budget exceeded"));
+    assert_eq!(
+        message.matches('\n').count(),
+        1,
+        "both resources on separate lines"
+    );
+}

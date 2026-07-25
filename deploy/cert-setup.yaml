@@ -1,0 +1,5 @@
+# TLS certificate provisioning for the webhook HTTPS endpoint.
+#
+# Placeholder — the full manifest (cert-manager Certificate, default path, with
+# a documented fallback to a manually-provided TLS Secret) lands in Phase 6,
+# task T040.
