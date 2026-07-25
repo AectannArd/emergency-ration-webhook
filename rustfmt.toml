@@ -1,0 +1,8 @@
+# rustfmt configuration — canonical formatting for *.rs (authoritative per
+# Constitution Principle IX; the .editorconfig mirrors these defaults).
+#
+# Only stable rustfmt options are used so `cargo fmt` works on stable toolchains.
+
+edition = "2024"
+style_edition = "2024"
+max_width = 100
