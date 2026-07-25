@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.0.0 → 2.1.0 (MINOR — Principle IX added: Editor Configuration as Code)
+Version change: 2.1.0 → 2.2.0 (MINOR — Development Workflow expanded: branch-and-PR workflow rule)
+  Prior: 2.0.0 → 2.1.0 (MINOR — Principle IX added: Editor Configuration as Code)
   Prior: 1.4.0 → 2.0.0 (MAJOR — Principle V redefined: single-webhook → 3-component operator, 2026-07-25)
   Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
   Prior: 1.0.0 → 1.1.0 (Principle VI added, 2026-07-25)
@@ -35,6 +36,9 @@ Modified in v2.0.0:
     now just 'Go toolchain cost').
 Modified in v2.1.0:
   - Development Workflow: quality gate now requires .editorconfig compliance.
+Modified in v2.2.0:
+  - Development Workflow: added branch-and-PR rule — every spec implemented on a
+    dedicated feature branch, merged to `main` only via pull request.
 Added sections (cumulative):
   - Core Principles I–IX
   - Technology Constraints
@@ -294,6 +298,14 @@ not by ad-hoc convention or review nitpicks.
   on the planning host; implementation (tasks, implement, test) is delegated to
   the coding agent on the build host. The git repository is the sync mechanism —
   planning commits are pulled before implementation begins.
+- **Branch-and-PR workflow**: every spec is implemented on a dedicated feature
+  branch (e.g. `spec/<feature>`, matching the `specs/<feature>/` directory) and
+  merged into `main` **only** via a pull request — no implementation work lands
+  directly on `main`. The pull request is the review and integration point: it
+  MUST pass the quality gate (below) before merge. This governs implementation;
+  planning artifacts (constitution, spec, plan) continue to land on `main` per
+  the dual-agent split, since they are the input to — not the output of —
+  implementation.
 - **Test-first (TDD)**: development follows strict Red-Green-Refactor
   (Principle VIII). The admission decision logic MUST have unit tests covering
   admit, reject, and every enumerated failure-mode path from Principle III;
@@ -328,4 +340,4 @@ not by ad-hoc convention or review nitpicks.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.1.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 2.2.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
