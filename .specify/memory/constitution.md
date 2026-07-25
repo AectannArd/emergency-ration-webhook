@@ -1,7 +1,6 @@
 <!--
 === Sync Impact Report ===
-Version change: 1.0.0 → 1.2.0 (supersedes remote v1.0.0; incorporates prior
-  amendments ratifying Principles VI and VII)
+Version change: 1.2.0 → 1.3.0 (MINOR — integration test framework locked + deferred detail ported)
   Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
   Prior: 1.0.0 → 1.1.0 (Principle VI added, 2026-07-25)
   Prior: 1.1.0 → 1.2.0 (Principle VII added, 2026-07-25)
@@ -9,14 +8,16 @@ Modified principles (vs remote v1.0.0):
   - II. Fail-Safe by Design → I. Fail-Closed by Default (NON-NEGOTIABLE).
     Remote v1.0.0 set a provisional fail-open default pending /speckit-clarify.
     The owner has now decided: fail-closed is the non-negotiable default.
-    This is a MAJOR-in-spirit governance change (principle redefinition) but is
-    folded into this consolidation version because the v1.0.0 default was
-    explicitly marked provisional and never confirmed. Numbered 1.x, not 2.0.0,
-    on that basis.
 Added principles:
   - v1.0.0: Principles I–V (initial ratification; renamed/reordered here)
   - v1.1.0: VI — Integration Test Coverage of Main and Exceptional Workflows
   - v1.2.0: VII — Kubernetes Version Support Window (N-2)
+Modified in v1.3.0:
+  - Principle VI: integration test framework selection locked (tower-test mocks
+    + cucumber-rs BDD; kube-rs/envtest rejected on Go-toolchain grounds).
+  - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
+    Security/RBAC model (ported from superseded v1.0.0).
+  - Development Workflow: added quality-gate detail (mocks as default test path).
 Added sections (cumulative):
   - Core Principles I–VII
   - Technology Constraints
@@ -24,13 +25,10 @@ Added sections (cumulative):
   - Governance
 Removed sections: none
 Templates requiring updates:
-  - .specify/templates/plan-template.md — ✅ no change needed (Constitution Check gate is generic; plan author derives gates from this file)
-  - .specify/templates/spec-template.md — ✅ no change needed (no constitution-coupled sections)
-  - .specify/templates/tasks-template.md — ✅ no change needed (no constitution-coupled sections)
-Follow-up TODOs:
-  - Port concrete SLO targets, dependency list (kube-rs/axum/hyper/rustls), and
-    security model (TLS/RBAC) from the superseded v1.0.0 into a follow-up
-    amendment (v1.3.0) so that detail is not lost.
+  - .specify/templates/plan-template.md — ✅ no change needed
+  - .specify/templates/spec-template.md — ✅ no change needed
+  - .specify/templates/tasks-template.md — ✅ no change needed
+Follow-up TODOs: none (v1.3.0 resolves the deferred SLO/deps/security port).
 === Sync Impact Report End ===
 -->
 
@@ -131,8 +129,14 @@ decision logic.
   request) MUST have a corresponding integration test asserting the reject /
   fail-closed outcome.
 - Integration tests exercise the webhook against a realistic admission request
-  flow (fake/in-memory API surface, and where feasible a local control plane
-  such as `kwok`/`kind`), not isolated function calls.
+  flow. The default integration test path uses `tower-test` to mock the
+  kube-apiserver as a `tower::Service`, feeding scripted AdmissionReview
+  request/response scenarios through the webhook. This avoids a Go toolchain
+  dependency (rejecting `kube-rs/envtest` on Principle V grounds) while keeping
+  tests fast and isolated. E2E coverage on CI uses a `k3d`/`kind` cluster.
+- BDD structure: integration tests SHOULD be organised as Gherkin `.feature`
+  files executed via `cucumber-rs` (Given/When/Then against a mocked apiserver
+  `World`), so failure paths are readable by non-Rust reviewers.
 - Rationale: unit tests prove the budget arithmetic; integration tests prove the
   webhook actually rejects/admits when wired into the admission path. A
   fail-closed guardian that only passes unit tests is unverified at the
@@ -171,6 +175,21 @@ current release plus the two preceding — i.e. N, N-1, N-2).
 - **Configuration**: the capacity percentage ceiling and webhook settings MUST
   be configurable via standard Kubernetes mechanisms (ConfigMap / flags / env),
   not compiled in.
+- **Primary dependencies**: async runtime (`tokio`), HTTP/TLS server
+  (`axum`/`hyper` + `rustls`), Kubernetes client/informer (`kube-rs`),
+  `serde` for serialising admission objects, `tracing` for structured logs,
+  a Prometheus metrics crate.
+- **Testing**: unit tests via standard `#[test]`; integration tests via
+  `tower-test` (mocked apiserver `tower::Service`); BDD via `cucumber-rs`
+  (`.feature` files); E2E via `k3d`/`kind` on CI across the N-2 matrix.
+  `kube-rs/envtest` is explicitly rejected for v1 (Go toolchain cost violates
+  Principle V).
+- **Performance targets (provisional, ratify in /speckit-plan)**: p99 admission
+  decision < 100 ms excluding kube-apiserver overhead, < 50 ms p50; webhook
+  resource footprint target < 256 Mi request, < 500 m CPU.
+- **Security**: TLS for the webhook endpoint (cert from a Secret or issued by
+  cert-manager); least-privilege RBAC (read on nodes + pods; no writes); no
+  secrets stored or logged by the webhook.
 - **No host paths or machine-specific paths in tracked files.** The repository
   is portable across the dev setup.
 
@@ -189,6 +208,9 @@ current release plus the two preceding — i.e. N, N-1, N-2).
 - **Quality gate**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo
   test` (unit + integration) all green before merge. No admission-core change
   lands without a covering test.
+- **Integration test default**: the mocked-apiserver path (`tower-test`) is the
+  default test target for `cargo test`; E2E tests run on CI against a `k3d`
+  cluster and are marked `#[ignore]` so they do not run on a plain `cargo test`.
 - **Verification gate**: a feature is not complete until its tests pass against
   the real code path, not a stub.
 
@@ -205,4 +227,4 @@ current release plus the two preceding — i.e. N, N-1, N-2).
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 1.2.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 1.3.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
