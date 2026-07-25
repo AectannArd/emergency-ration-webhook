@@ -1,91 +1,93 @@
 <!--
-Sync Impact Report
-==================
-Version change: (unratified template) → 1.0.0
-  - Rationale: initial ratification. First adoption of governance is treated as
-    a MAJOR (1.0.0) release per SemVer-for-governance.
-Modified principles: all PRINCIPLE_N placeholders → concrete principles below.
-  - I. Safety & Correctness First
-  - II. Fail-Safe by Design
-  - III. Stateless, Fast, Horizontally Scalable
-  - IV. Observability
-  - V. Test Discipline (NON-NEGOTIABLE)
-  - VI. Simplicity (YAGNI)
-Added sections:
-  - Technology Stack & Constraints
-  - Development Workflow & Quality Gates
+=== Sync Impact Report ===
+Version change: 1.0.0 → 1.2.0 (supersedes remote v1.0.0; incorporates prior
+  amendments ratifying Principles VI and VII)
+  Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
+  Prior: 1.0.0 → 1.1.0 (Principle VI added, 2026-07-25)
+  Prior: 1.1.0 → 1.2.0 (Principle VII added, 2026-07-25)
+Modified principles (vs remote v1.0.0):
+  - II. Fail-Safe by Design → I. Fail-Closed by Default (NON-NEGOTIABLE).
+    Remote v1.0.0 set a provisional fail-open default pending /speckit-clarify.
+    The owner has now decided: fail-closed is the non-negotiable default.
+    This is a MAJOR-in-spirit governance change (principle redefinition) but is
+    folded into this consolidation version because the v1.0.0 default was
+    explicitly marked provisional and never confirmed. Numbered 1.x, not 2.0.0,
+    on that basis.
+Added principles:
+  - v1.0.0: Principles I–V (initial ratification; renamed/reordered here)
+  - v1.1.0: VI — Integration Test Coverage of Main and Exceptional Workflows
+  - v1.2.0: VII — Kubernetes Version Support Window (N-2)
+Added sections (cumulative):
+  - Core Principles I–VII
+  - Technology Constraints
+  - Development Workflow
   - Governance
-Removed sections: none (template placeholders resolved).
+Removed sections: none
 Templates requiring updates:
-  - .specify/templates/plan-template.md        — ✅ no change (generic; "Constitution Check" gate is filled per-feature from this file)
-  - .specify/templates/spec-template.md        — ✅ no change (generic)
-  - .specify/templates/tasks-template.md       — ✅ no change (generic)
+  - .specify/templates/plan-template.md — ✅ no change needed (Constitution Check gate is generic; plan author derives gates from this file)
+  - .specify/templates/spec-template.md — ✅ no change needed (no constitution-coupled sections)
+  - .specify/templates/tasks-template.md — ✅ no change needed (no constitution-coupled sections)
 Follow-up TODOs:
-  - The default failure mode (fail-open vs fail-closed) under Principle II is an
-    opinionated first stance; confirm or override during /speckit-clarify.
-  - Exact latency budget numbers under Principle III are provisional targets;
-    ratify concrete SLOs during /speckit-plan.
+  - Port concrete SLO targets, dependency list (kube-rs/axum/hyper/rustls), and
+    security model (TLS/RBAC) from the superseded v1.0.0 into a follow-up
+    amendment (v1.3.0) so that detail is not lost.
+=== Sync Impact Report End ===
 -->
 
-# emergency-ration-webhook Constitution
-
-A Kubernetes admission webhook that tracks cluster capacity (CPU and RAM) and
-enforces that scheduled workloads do not exceed a configurable capacity
-percentage, preserving headroom ("emergency ration") for surges and failures.
+# Emergency Ration Webhook Constitution
 
 ## Core Principles
 
-### I. Safety & Correctness First
+### I. Fail-Closed by Default (NON-NEGOTIABLE)
 
-The webhook is critical cluster control-plane infrastructure: a wrong admission
-decision can either break scheduling for the whole cluster or silently defeat
-the capacity guarantee the webhook exists to provide.
+The webhook exists to prevent cluster overcommit. When it cannot authoritatively
+verify that a workload fits within the configured capacity budget — for any
+reason (webhook process down, metrics/capacity API unreachable, TLS failure,
+timeout exceeded, deserialization error) — it MUST reject the admission request.
 
-- Admission decisions MUST be deterministic: the same (cluster state, pod
-  request) pair MUST always yield the same allow/deny verdict.
+- `failurePolicy: Fail` is the only supported default for the ValidatingWebhookConfiguration.
+- A denial is always a safe outcome; an admission under degraded knowledge is never safe.
+- The admission response MUST set `allowed: false` on every non-verifiable path.
+- Rationale: a capacity guardian that admits when it cannot measure has failed
+  its only job. Cluster stability outranks deploy throughput.
+
+### II. Capacity as a Hard Budget (NON-NEGOTIABLE)
+
+CPU and RAM are tracked against a configurable percentage ceiling of cluster
+capacity. Admission decisions are deterministic budget checks, not heuristics
+or "best effort" estimates.
+
+- The configured capacity percentage is the source of truth — there is no soft
+  limit, no override by annotation, no per-workload exception in v1.
+- Scheduled (not yet running) workloads MUST be counted against the budget so
+  the webhook prevents overcommit before it happens, not after.
 - The canonical source of capacity truth MUST be the Kubernetes API server
   (node `.status.allocatable` and pod resource requests/limits). The webhook
   MUST NOT rely on out-of-band or human-fed capacity data.
-- Capacity accounting MUST be conservative: when resource requests are absent
-  (e.g. limits-only containers), a documented fallback MUST be applied and MUST
-  not silently under-count.
+- Rationale: predictable, auditable admission is the product. Fuzzy limits
+  defeat the purpose.
 
-### II. Fail-Safe by Design
+### III. Explicit Failure Mode Configuration
 
-A webhook in the admission path can fail (crash, timeout, TLS error). Its
-failure mode is a first-class, documented, configurable decision — never an
-accident.
+The failure mode is not emergent behaviour — it is declared, tested, and
+documented. Every code path that could cause a non-verifiable admission MUST
+map to one of:
 
-- The webhook's `failurePolicy` (fail-open = `Ignore` to preserve cluster
-  availability, fail-closed = `Fail` to preserve the capacity guarantee) MUST be
-  explicit in every deployment manifest and MUST be documented.
-- **Provisional default: fail-open** (`failurePolicy: Ignore`, `timeoutSeconds:
-  3`). Rationale: a broken admission webhook MUST NOT wedge cluster-wide pod
-  creation; availability trumps the capacity guarantee when the webhook itself
-  is the thing that is broken. Operators who need a hard capacity ceiling set
-  fail-closed deliberately. *(Confirm during /speckit-clarify.)*
-- The webhook MUST degrade gracefully when it cannot reach the API server
-  (cache-stale behaviour documented; never panic the request path).
+1. Reject (the default, per Principle I), or
+2. A narrow, explicitly-configured exception with a recorded justification.
 
-### III. Stateless, Fast, Horizontally Scalable
+There is no third "undefined" category. Unknown error types reject by default.
 
-The webhook sits in the hot path of pod admission. Performance is a feature and
-a reliability concern.
+- Rationale: in a control-plane component, implicit/undocumented failure
+  behaviour is a latent incident. The decision tree MUST be enumerable from the
+  source and the tests.
 
-- The webhook MUST be horizontally scalable: any replica MUST be able to answer
-  any AdmissionReview. No sticky state, no leader-elected admission authority.
-- The webhook MUST NOT block admission on a synchronous full-cluster API list.
-  Capacity state MUST come from a local informer/watch cache refreshed in the
-  background; admission latency MUST stay within a strict budget.
-- Provisional SLO: p99 admission decision < 100 ms excluding kube-apiserver
-  overhead, < 50 ms p50. *(Ratify concrete SLOs during /speckit-plan.)*
-- Resource footprint MUST be modest (target < 256 Mi request, < 500 m CPU) so
-  the guard does not itself consume the ration it protects.
+### IV. Observability Before Optimisation
 
-### IV. Observability
-
-Every admission decision MUST be explainable after the fact. Capacity
-enforcement that cannot be inspected will not be trusted by operators.
+The webhook MUST emit structured logs and metrics sufficient to answer, for any
+admission request: what was requested, what capacity was seen, what was
+decided, and why. Capacity state changes and every rejection reason are
+first-class observability events.
 
 - Structured logging (`tracing`) MUST accompany every allow/deny with the
   decision, the triggering workload, and the capacity figures used.
@@ -94,76 +96,113 @@ enforcement that cannot be inspected will not be trusted by operators.
   per resource type.
 - Denials MUST carry a clear, human-readable `message` and, where applicable, a
   machine-readable `reason` on the AdmissionResponse.
+- Metrics and structured logging are required for the v1 admission path; they
+  are not a "polish phase" task.
+- Rationale: a capacity controller that cannot explain its own decisions cannot
+  be trusted in production or debugged during an incident.
 
-### V. Test Discipline (NON-NEGOTIABLE)
+### V. Simplicity and YAGNI
 
-Admission logic is pure given (cluster state, AdmissionReview). That purity is
-exploited ruthlessly.
-
-- TDD is mandatory: tests written → reviewed → fail → then implement.
-  Red-Green-Refactor is strictly enforced for the admission core.
-- The admission decision function MUST be unit-testable in isolation, taking
-  capacity state and a parsed request as plain values, returning a verdict.
-- Property-based tests MUST cover the core invariant: total admitted requests
-  never exceeds the configured capacity percentage when the policy denies.
-- Integration tests MUST exercise the webhook against a fake/in-memory API
-  surface (and, where feasible, a local control plane such as `kwok`/`kind`).
-
-### VI. Simplicity (YAGNI)
-
-Start with the minimal enforcement that delivers the guarantee. Every addition
-(mutation, multi-resource, namespace scoping, priority classes) MUST justify
-itself against the core invariant.
+Start with the minimum that enforces the budget correctly: a single
+ValidatingWebhook, synchronous capacity check, one config source. Add
+complexity (mutating webhooks, multiple budgets, caching layers, custom
+exceptions) only when a concrete, evidence-backed need appears.
 
 - One resource-accounting model, one enforcement policy, one webhook type
   (Validating) unless a requirement forces otherwise.
 - Configuration via ConfigMap and/or flags; no database, no CRDs for v1.
+- Prefer standard Kubernetes types and stable APIs over alpha/custom resources
+  unless the stable surface is provably insufficient.
 - Complexity MUST be justified in the plan's Complexity Tracking table.
+- Rationale: admission webhooks sit on the critical path of every deploy;
+  unnecessary surface area is unnecessary risk.
 
-## Technology Stack & Constraints
+### VI. Integration Test Coverage of Main and Exceptional Workflows
+
+The webhook's main (happy-path) workflow AND its exceptional (error/edge)
+workflows MUST be covered by integration tests — not only unit tests of the
+decision logic.
+
+- Main workflow: a valid admission request that fits within the capacity budget
+  is admitted, with capacity state observed end-to-end through the real
+  admission path (AdmissionReview in → response out).
+- Exceptional workflows: every enumerated failure path from Principle III
+  (over-budget rejection, capacity source unreachable, timeout, malformed
+  request) MUST have a corresponding integration test asserting the reject /
+  fail-closed outcome.
+- Integration tests exercise the webhook against a realistic admission request
+  flow (fake/in-memory API surface, and where feasible a local control plane
+  such as `kwok`/`kind`), not isolated function calls.
+- Rationale: unit tests prove the budget arithmetic; integration tests prove the
+  webhook actually rejects/admits when wired into the admission path. A
+  fail-closed guardian that only passes unit tests is unverified at the
+  boundary that matters.
+
+### VII. Kubernetes Version Support Window (N-2)
+
+The webhook MUST support the three most recent major Kubernetes releases (the
+current release plus the two preceding — i.e. N, N-1, N-2).
+
+- The ValidatingWebhookConfiguration and all Kubernetes API types used MUST be
+  available and stable across the supported window. Prefer APIs that are GA/stable
+  in the oldest supported release.
+- Deprecation of support for an older release MUST be a documented, deliberate
+  decision (tracked as a constitution-relevant change), not drift.
+- As Kubernetes releases roughly three minor versions per year, the window is
+  effectively the current plus ~8 months of prior history; the webhook's CI MUST
+  test against each release in the window.
+- Rationale: cluster operators cannot always upgrade immediately, and an
+  admission webhook that only runs on the latest version is a forced upgrade
+  dependency. N-2 is the standard community support window.
+
+## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
-- **Role**: HTTP admission server returning Kubernetes `AdmissionReview`
-  responses; a Validating webhook for v1.
-- **Primary dependencies**: an async runtime (`tokio`), an HTTP/TLS server
-  (`axum`/`hyper` + `rustls`), a Kubernetes client/informer (`kube-rs`),
-  `serde` for (de)serialising admission objects, `tracing` for logs,
-  a Prometheus metrics crate.
-- **Deployment**: container image, `Deployment` behind a `Service`, served over
-  HTTPS (kube-apiserver → webhook is TLS); a `ValidatingWebhookConfiguration`
-  scoped to the resources/namespaces being protected.
-- **Security**: TLS for the webhook endpoint (cert mounted from a Secret or
-  issued by cert-manager); least-privilege RBAC for the service account (read on
-  nodes + pods; no writes). No secrets stored or logged by the webhook.
-- **Configuration**: capacity percentage(s), resource scopes, and fail-mode via
-  ConfigMap/flags; hot-reload is a v2 concern.
+  The webhook and its capacity-tracking logic are implemented in Rust for
+  latency, memory footprint, and correctness on the admission critical path.
+- **Runtime target**: Linux container, deployed as a Kubernetes workload
+  (`Deployment` behind a `Service`, served over HTTPS; DaemonSet is an
+  alternative to be settled in the plan).
+- **Kubernetes surface**: ValidatingWebhookConfiguration (v1). No MutatingWebhook
+  in scope for v1.
+- **Capacity inputs**: cluster node capacity (`.status.allocatable`) and
+  resource requests/limits from the Kubernetes API. Source of capacity *usage*
+  (live metrics vs. declared requests) to be resolved in clarification/plan.
+- **Configuration**: the capacity percentage ceiling and webhook settings MUST
+  be configurable via standard Kubernetes mechanisms (ConfigMap / flags / env),
+  not compiled in.
+- **No host paths or machine-specific paths in tracked files.** The repository
+  is portable across the dev setup.
 
-## Development Workflow & Quality Gates
+## Development Workflow
 
-- Spec-Kit workflow is authoritative: constitution → (clarify) → specify → plan
-  → tasks → implement, with review gates between phases.
-- Two-agent split: planning (Hermes) and implementation (Claude Code), synced
-  via `git`. `AGENTS.md` and `CLAUDE.md` are kept in sync by the
-  `agent-context` extension and MUST NOT be hand-edited inside their SPECKIT
-  markers.
-- Quality gate before merge: `cargo fmt --check`, `cargo clippy -- -D warnings`,
-  `cargo test` (unit + integration) all green. No admission-core change lands
-  without a covering test.
-- Every plan MUST pass a Constitution Check (see plan template) before research
-  proceeds; re-check after design.
+- **Spec-driven**: features are specified (`/speckit-specify`) and planned
+  (`/speckit-plan`) before implementation. Implementation MUST cite the plan.
+- **Dual-agent split**: planning (constitution, clarify, specify, plan) happens
+  on the planning host; implementation (tasks, implement, test) is delegated to
+  the coding agent on the build host. The git repository is the sync mechanism —
+  planning commits are pulled before implementation begins.
+- **Tests required**: the admission decision logic MUST have unit tests covering
+  admit, reject, and every enumerated failure-mode path from Principle III
+  before it is considered done. Capacity budget arithmetic MUST be tested at
+  boundaries (exactly at ceiling, one unit over, zero remaining).
+- **Quality gate**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo
+  test` (unit + integration) all green before merge. No admission-core change
+  lands without a covering test.
+- **Verification gate**: a feature is not complete until its tests pass against
+  the real code path, not a stub.
 
 ## Governance
 
-- This constitution is the highest-authority document in the repo. Where any
-  spec, plan, or implementation choice conflicts with it, the constitution wins
-  unless the conflict is resolved via a documented amendment.
-- Amendments require: (a) a written proposal stating the change and rationale,
-  (b) a version bump per SemVer — MAJOR for principle removal/redefinition,
-  MINOR for added principles/sections, PATCH for clarification — and (c) an
-  updated `Last Amended` date.
-- All code review and planning MUST verify constitution compliance; unjustified
-  complexity MUST be rejected at the plan's Complexity Tracking gate.
-- Use `.specify/memory/constitution.md` (this file) as the single source of
-  governance; do not duplicate its principles elsewhere.
+- This constitution supersedes all other project practices when they conflict.
+- Amendments require: (a) a documented change with rationale, (b) a version bump
+  following semantic versioning (MAJOR for principle removal/redefinition,
+  MINOR for a new principle or material expansion, PATCH for clarification),
+  (c) propagation through the dependent spec/plan/tasks templates, and (d) a
+  commit recording the ratification date.
+- Every spec's Constitution Check gate MUST be evaluated against this file
+  before the plan advances past design.
+- Use `.specify/memory/constitution.md` as the single source of truth for these
+  principles; if a doc disagrees, the constitution wins.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 1.2.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
