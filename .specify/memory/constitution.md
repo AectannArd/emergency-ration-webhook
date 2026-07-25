@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 1.4.0 → 2.0.0 (MAJOR — Principle V redefined: single-webhook → 3-component operator)
+Version change: 2.0.0 → 2.1.0 (MINOR — Principle IX added: Editor Configuration as Code)
+  Prior: 1.4.0 → 2.0.0 (MAJOR — Principle V redefined: single-webhook → 3-component operator, 2026-07-25)
   Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
   Prior: 1.0.0 → 1.1.0 (Principle VI added, 2026-07-25)
   Prior: 1.1.0 → 1.2.0 (Principle VII added, 2026-07-25)
@@ -21,6 +22,7 @@ Added principles:
   - v1.1.0: VI — Integration Test Coverage of Main and Exceptional Workflows
   - v1.2.0: VII — Kubernetes Version Support Window (N-2)
   - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE)
+  - v2.1.0: IX — Editor Configuration as Code
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -31,8 +33,10 @@ Modified in v2.0.0:
     via CRD spec; Capacity inputs sourced via controllers.
   - Principle VI: envtest rejection rationale updated (was 'Principle V grounds',
     now just 'Go toolchain cost').
+Modified in v2.1.0:
+  - Development Workflow: quality gate now requires .editorconfig compliance.
 Added sections (cumulative):
-  - Core Principles I–VIII
+  - Core Principles I–IX
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -219,6 +223,31 @@ written to pass them. Red-Green-Refactor is strictly enforced.
   are biased by the implementation and miss the edge cases you forgot. Seeing
   the test fail is the only proof it actually tests something.
 
+### IX. Editor Configuration as Code
+
+Mechanical file-formatting rules — indentation, line endings, final newline,
+trailing whitespace, character encoding — are declared once in a versioned
+`.editorconfig` at the repository root and enforced by editor tooling and CI,
+not by ad-hoc convention or review nitpicks.
+
+- The `.editorconfig` is the single source of truth for mechanical formatting
+  across every file type in the repo (Rust, TOML, YAML, JSON, Markdown, shell,
+  PowerShell, Python, Gherkin `.feature`, Dockerfile, Makefile).
+- Where a language has its own canonical formatter (`rustfmt`, `taplo`, `shfmt`,
+  `prettier`), that formatter is AUTHORITATIVE and the `.editorconfig` MUST
+  mirror it — they are not independent sources. `rustfmt` governs `*.rs`; the
+  `.editorconfig` governs everything `rustfmt` does not reach.
+- Adding a new file type to the repo MUST add (or confirm) a matching section in
+  `.editorconfig` in the same change. An unconfigured file type is a formatting
+  debt.
+- Formatting changes are real changes: they require a commit and the same review
+  as any other. "My editor did it" is not a valid unexplained diff, and silent
+  reformatting of unrelated lines in a functional commit is review-blocking.
+- Rationale: formatting churn from inconsistent editor settings pollutes diffs,
+  obscures real changes in `git blame`, and wastes review cycles on noise.
+  Declaring the rules in a machine-readable, editor-agnostic file removes the
+  entire class of disagreement at the source.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -272,6 +301,10 @@ written to pass them. Red-Green-Refactor is strictly enforced.
   budget arithmetic MUST be tested at boundaries (exactly at ceiling, one unit
   over, zero remaining). Integration tests (Principle VI) are likewise written
   before the workflow they cover.
+- **Formatting as code**: mechanical formatting (indent, line endings, final
+  newline, trailing whitespace) is declared in `.editorconfig` (Principle IX)
+  and MUST agree with the language's canonical formatter. Formatting drift is a
+  review-blocking diff, not an editor preference.
 - **Quality gate**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo
   test` (unit + integration) all green before merge. No admission-core change
   lands without a covering test, and no production code lands without a failing
@@ -295,4 +328,4 @@ written to pass them. Red-Green-Refactor is strictly enforced.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.0.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 2.1.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
