@@ -94,8 +94,19 @@ jobs:
             webhook=capacity-admission-webhook:e2e
       - name: Wait for webhook readiness
         run: |
-          kubectl -n capacity-admission wait --for=condition=Ready pod \
-            -l app=capacity-admission-webhook --timeout=120s
+          if ! kubectl -n capacity-admission wait --for=condition=Ready pod \
+            -l app=capacity-admission-webhook --timeout=120s; then
+            echo "::group::Pod describe (debug)"
+            kubectl -n capacity-admission describe pod -l app=capacity-admission-webhook
+            echo "::endgroup::"
+            echo "::group::Pod logs (debug)"
+            kubectl -n capacity-admission logs -l app=capacity-admission-webhook --tail=50 || true
+            echo "::endgroup::"
+            echo "::group::Events (debug)"
+            kubectl -n capacity-admission get events --sort-by=.lastTimestamp | tail -20
+            echo "::endgroup::"
+            exit 1
+          fi
       - name: Configure the budget
         run: |
           kubectl apply -f - <<EOF
