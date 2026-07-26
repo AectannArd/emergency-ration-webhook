@@ -91,6 +91,11 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -keyout tls.key -out tls.crt \
             -days 1 -config csr.conf -extensions v3_req
 
+          # Create the namespace first — RBAC and the Deployment reference it.
+          kubectl apply -f deploy/deployment.yaml -o yaml --dry-run=client \
+            | grep -A3 'kind: Namespace' >/dev/null 2>&1 || true
+          kubectl create namespace capacity-admission --dry-run=client -o yaml | kubectl apply -f -
+
           kubectl apply -f deploy/rbac.yaml
           kubectl apply -f deploy/crds.yaml
 
