@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.1.0 → 2.2.0 (MINOR — Development Workflow expanded: branch-and-PR workflow rule)
+Version change: 2.2.0 → 2.3.0 (MINOR — Principle X added: User-Facing Functionality Documented in README.md)
+  Prior: 2.1.0 → 2.2.0 (MINOR — Development Workflow expanded: branch-and-PR workflow rule)
   Prior: 2.0.0 → 2.1.0 (MINOR — Principle IX added: Editor Configuration as Code)
   Prior: 1.4.0 → 2.0.0 (MAJOR — Principle V redefined: single-webhook → 3-component operator, 2026-07-25)
   Prior: (untracked template) → 1.0.0 (initial ratification, 2026-07-25)
@@ -24,6 +25,7 @@ Added principles:
   - v1.2.0: VII — Kubernetes Version Support Window (N-2)
   - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE)
   - v2.1.0: IX — Editor Configuration as Code
+  - v2.3.0: X — User-Facing Functionality Documented in README.md
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -39,8 +41,11 @@ Modified in v2.1.0:
 Modified in v2.2.0:
   - Development Workflow: added branch-and-PR rule — every spec implemented on a
     dedicated feature branch, merged to `main` only via pull request.
+Modified in v2.3.0:
+  - Development Workflow: added documentation-as-deliverable rule — user-facing
+    changes MUST update README.md in the same change.
 Added sections (cumulative):
-  - Core Principles I–IX
+  - Core Principles I–X
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -252,6 +257,36 @@ not by ad-hoc convention or review nitpicks.
   Declaring the rules in a machine-readable, editor-agnostic file removes the
   entire class of disagreement at the source.
 
+### X. User-Facing Functionality is Documented in README.md
+
+Every user-facing capability of the webhook — installation, configuration,
+deployment, and operational behaviour — MUST be documented in the repository's
+`README.md`. A feature is not complete until a human operator can discover,
+configure, and operate it from the README alone.
+
+- "User-facing" means anything an operator or integrator interacts with:
+  command-line flags, environment variables, the webhook's admission behaviour,
+  CRD `spec`/`status` fields, exposed metrics, structured-log keys, deployment
+  manifests, and upgrade or deprecation notes.
+- The README is the single entry point for user-facing documentation; deeper
+  reference material MAY live in `docs/`, but the README MUST link to it and MUST
+  itself cover the essentials. A capability documented only in code, specs, or
+  commit messages is not documented.
+- A change that adds or alters user-facing functionality MUST update `README.md`
+  in the same change (same commit / PR). A PR that ships user-facing behaviour
+  without a README delta is incomplete and MUST be blocked at review — the same
+  standard as the test-first rule (Principle VIII) and the `.editorconfig` rule
+  (Principle IX).
+- Documentation is treated like code: versioned, reviewed, and, where feasible,
+  verified (e.g. quickstart steps that are runnable in CI). Stale or inaccurate
+  documentation is a defect, not a cosmetic issue.
+- Rationale: an admission webhook is infrastructure operators trust on the
+  critical path. Undocumented configuration, flags, or failure behaviour is an
+  operational hazard — operators cannot safely deploy, tune, or debug what they
+  cannot read about. Making the README a first-class deliverable, updated in
+  lockstep with the feature, keeps the source of truth from drifting from the
+  software.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -317,6 +352,15 @@ not by ad-hoc convention or review nitpicks.
   newline, trailing whitespace) is declared in `.editorconfig` (Principle IX)
   and MUST agree with the language's canonical formatter. Formatting drift is a
   review-blocking diff, not an editor preference.
+- **Documentation as a deliverable**: every user-facing capability (flags, env
+  vars, admission behaviour, CRD spec/status fields, metrics, log keys,
+  deployment, upgrade notes) MUST be documented in `README.md` (Principle X).
+  README is the single entry point; deeper material MAY live in `docs/` but the
+  README MUST cover the essentials and link to it. A change that adds or alters
+  user-facing functionality MUST update `README.md` in the same change — a PR
+  shipping user-facing behaviour without a README delta is incomplete and
+  blocked at review, on the same footing as the test-first (Principle VIII) and
+  formatting (Principle IX) rules.
 - **Quality gate**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo
   test` (unit + integration) all green before merge. No admission-core change
   lands without a covering test, and no production code lands without a failing
@@ -340,4 +384,4 @@ not by ad-hoc convention or review nitpicks.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.2.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-25
+**Version**: 2.3.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-26
