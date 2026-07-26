@@ -58,7 +58,7 @@ spec:
               containerPort: 9090
           env:
             - name: RUST_LOG
-              value: info
+              value: debug
           # SC-006: requests below 256 MiB / 500m.
           resources:
             requests:

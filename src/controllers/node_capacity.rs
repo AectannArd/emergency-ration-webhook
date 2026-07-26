@@ -7,7 +7,7 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Node;
-use kube::api::{Patch, PatchParams, PostParams};
+use kube::api::{ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::{reflector, watcher};
 use kube::{Api, Client};
 use tracing::{debug, info, warn};
@@ -191,6 +191,23 @@ async fn patch_once(
         .await
 }
 
+/// Bootstrap reconcile: read nodes directly and patch the aggregate immediately,
+/// rather than waiting for the reflector's first watch event. The reflector
+/// cache is empty at startup; without this the singleton stays status-less until
+/// the initial node list is delivered (and the Allocation Controller, which
+/// derives its ceiling from this supply, then has nothing to compute from).
+/// Later node events from the reflector keep the status fresh.
+async fn reconcile_now(nodes: &Api<Node>, capacity_api: &Api<ClusterCapacity>) {
+    let (cpu, memory, node_count) = match nodes.list(&ListParams::default()).await {
+        Ok(list) => sum_node_allocatable(&list.items),
+        Err(err) => {
+            warn!(%err, "initial node list failed; deferring to watch events");
+            (0, 0, 0)
+        }
+    };
+    patch_status(capacity_api, cpu, memory, node_count).await;
+}
+
 /// Run the controller until the runtime is shut down. Owns a node reflector; on
 /// every node event it recomputes the aggregate from the cache and patches the
 /// `cluster-capacity` status (no network reads on the hot path).
@@ -202,6 +219,10 @@ pub async fn run(client: Client) {
     // Create the singleton before any patch_status — otherwise the first node
     // event 404s on a missing instance and the supply figures are never written.
     ensure_singleton(&capacity_api).await;
+
+    // Write the aggregate now from a direct node list (the reflector cache is
+    // still cold) so the singleton has status before the first watch event.
+    reconcile_now(&nodes, &capacity_api).await;
 
     let stream = reflector::reflector(writer, watcher::watcher(nodes, watcher::Config::default()));
     stream
@@ -484,5 +505,49 @@ mod tests {
         respond.send_response(ok_object(&default_capacity_singleton()));
 
         task.await.expect("patch_status did not panic");
+    }
+
+    #[tokio::test]
+    async fn reconcile_now_lists_nodes_then_patches_status() {
+        // The bootstrap reconcile must write status immediately on startup,
+        // independent of the reflector: it lists nodes, sums their allocatable,
+        // and patches the singleton — so the supply is published before the
+        // first watch event ever arrives.
+        let (client, mut handle) = mock_client();
+        let nodes = Api::<Node>::all(client.clone());
+        let capacity_api = Api::<ClusterCapacity>::all(client);
+        let task = tokio::spawn(async move {
+            reconcile_now(&nodes, &capacity_api).await;
+        });
+
+        // 1. Node LIST → one node with 16 CPU / 32 GiB allocatable.
+        let (req, respond) = handle.next_request().await.expect("node LIST");
+        assert_eq!(req.method().as_str(), "GET");
+        assert!(
+            req.uri().path().ends_with("/nodes"),
+            "LIST targets nodes: {}",
+            req.uri()
+        );
+        let node_list = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "NodeList",
+            "items": [{
+                "metadata": {"name": "a"},
+                "status": {"allocatable": {"cpu": "16", "memory": "32Gi"}}
+            }]
+        });
+        respond.send_response(ok_object(&node_list));
+
+        // 2. Status PATCH on the singleton → 200 (16 cores / 32 GiB / 1 node).
+        let (req, respond) = handle.next_request().await.expect("status PATCH");
+        assert_eq!(req.method().as_str(), "PATCH");
+        assert!(
+            req.uri().path().ends_with("/cluster-capacity/status"),
+            "PATCH targets the ClusterCapacity status subresource: {}",
+            req.uri()
+        );
+        respond.send_response(ok_object(&default_capacity_singleton()));
+
+        task.await.expect("reconcile_now did not panic");
     }
 }

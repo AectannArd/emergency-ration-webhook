@@ -284,6 +284,13 @@ pub async fn run(client: Client) {
         }),
     );
 
+    // Initial recompute: write status immediately rather than waiting for the
+    // first ticker tick, so the Allocation singleton is never left status-less
+    // after ensure_singleton creates it. The caches may still be cold here, so
+    // this first write may carry zeros — the reflectors sync and the ticker then
+    // refreshes with real figures within the tick window.
+    recompute(&pod_store, &capacity_store, &allocation_api).await;
+
     // Bounded-latency recompute: any change is reflected within the tick window.
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
     loop {
