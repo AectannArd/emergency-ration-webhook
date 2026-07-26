@@ -39,6 +39,15 @@ pub fn init_tracing() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install the rustls crypto provider FIRST — before any TLS operation
+    // (including kube Client::try_default(), which opens a TLS connection to
+    // the apiserver). Without this, rustls 0.23 panics with "Could not
+    // automatically determine the process-level CryptoProvider" because
+    // axum-server uses tls-rustls-no-provider, so auto-detection fails.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install ring CryptoProvider");
+
     init_tracing();
     let config = Config::load();
     info!(
@@ -113,15 +122,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // HTTPS admission server + plaintext HTTP metrics/probe server, sharing one
     // shutdown handle.
-    //
-    // rustls 0.23 requires an explicit process-level CryptoProvider when the
-    // crate is built with multiple crypto backends (or when the selection
-    // cannot be inferred at link time). We enable the "ring" feature in
-    // Cargo.toml; install it as the default before constructing any Rustls
-    // config so the provider panic never fires at runtime.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install ring CryptoProvider");
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
         &config.tls_cert_file,
         &config.tls_key_file,
