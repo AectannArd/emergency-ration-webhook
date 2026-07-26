@@ -144,16 +144,55 @@ jobs:
           echo "Waiting for Allocation status to be populated..."
           for i in $(seq 1 30); do
             if kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null | grep -q '[0-9]'; then
-              echo "Allocation status populated (ceiling=$($(kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}'))m CPU)"
+              echo "Allocation status populated."
               break
             fi
             sleep 2
           done
 
+          # kubectl run --requests was removed in newer kubectl versions;
+          # apply explicit Pod manifests instead.
+
           # A small pod in an allowed namespace must be admitted.
-          kubectl -n default run smoke-ok --image=nginx --requests='cpu=10m,memory=10Mi' --restart=Never
+          cat <<'POD' | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: smoke-ok
+            namespace: default
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: nginx
+                image: nginx
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 10Mi
+          POD
+
           # An over-budget request must be denied by the webhook (fail-closed).
-          ! kubectl -n default run smoke-over --image=nginx --requests='cpu=999,memory=999Gi' --restart=Never
+          if cat <<'POD' | kubectl apply -f - 2>&1; then
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: smoke-over
+            namespace: default
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: nginx
+                image: nginx
+                resources:
+                  requests:
+                    cpu: 999
+                    memory: 999Gi
+          POD
+            echo "ERROR: over-budget pod was admitted — webhook should have denied it!"
+            exit 1
+          else
+            echo "Over-budget pod correctly denied by the webhook."
+          fi
       - name: Run ignored tests (performance benchmark)
         run: cargo test --test performance -- --ignored --nocapture
 
