@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.3.0 → 2.4.0 (MINOR — Principle XI added: CI-Green Completion Gate)
+Version change: 2.4.0 → 2.5.0 (MINOR — Principle XII added: Scratch Space for Agent Intercommunication)
+  Prior: 2.3.0 → 2.4.0 (MINOR — Principle XI added: CI-Green Completion Gate)
   Prior: 2.2.0 → 2.3.0 (MINOR — Principle X added: User-Facing Functionality Documented in README.md)
   Prior: 2.1.0 → 2.2.0 (MINOR — Development Workflow expanded: branch-and-PR workflow rule)
   Prior: 2.0.0 → 2.1.0 (MINOR — Principle IX added: Editor Configuration as Code)
@@ -28,6 +29,7 @@ Added principles:
   - v2.1.0: IX — Editor Configuration as Code
   - v2.3.0: X — User-Facing Functionality Documented in README.md
   - v2.4.0: XI — CI-Green Completion Gate
+  - v2.5.0: XII — Scratch Space for Agent Intercommunication
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -53,7 +55,7 @@ Modified in v2.4.0:
     whether the failure is in the changed code or pre-existing
     infrastructure.
 Added sections (cumulative):
-  - Core Principles I–XI
+  - Core Principles I–XII
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -327,6 +329,38 @@ is failing — for any reason — is an incomplete deliverable, not a finished o
   CI fails teaches the team to tolerate unverified work, which is the exact
   anti-pattern the webhook exists to prevent at the cluster level.
 
+### XII. Scratch Space for Agent Intercommunication
+
+The repository MUST provide a single git-ignored scratch directory (`.temp/`)
+for transient artifacts that are produced during a task, consumed within the
+same task or by the downstream agent, and deleted or abandoned afterward.
+Scratch files are never committed and never shipped.
+
+- **Purpose**: agents and scripts produce intermediate output that exists to be
+  read by the next step, not to be preserved — validation reports, test-run
+  logs, rendered manifests, extracted snippets, checkpoint dumps, captured
+  command output. These belong in `.temp/`, NOT in the repository root or any
+  tracked directory.
+- **Never tracked**: `.temp/` is git-ignored. Files inside it are ephemeral by
+  definition — if an artifact needs to survive a task, it must be promoted to a
+  tracked location (specs, README, source) with an explicit justification.
+- **Agent intercommunication**: when the planning agent and the implementation
+  agent (or any two automated steps) need to exchange a file (e.g. a
+  pre-rendered plan excerpt, a verification checklist), they write it to
+  `.temp/` and reference it by relative path. The receiver reads it from there.
+  This replaces the anti-pattern of writing such files to the repo root (which
+  risks accidental commits like `VALIDATION.md`).
+- **Naming**: no convention enforced — the writer picks a descriptive filename.
+  Collision avoidance is the writer's responsibility; overwriting is acceptable.
+- **No cleanup obligation**: files MAY linger in `.temp/` across sessions; they
+  are disposable. `.temp/` being non-empty is not a defect.
+- **Rationale**: a tracked file in the repository root that was intended as a
+  one-time validation report (`VALIDATION.md`) revealed the gap: agents need a
+  write target for transient files, and absent a designated scratch space they
+  default to the repo root, where the files get committed and pollute history.
+  `.temp/` closes that gap by making the scratch space explicit, git-ignored,
+  and discoverable to every agent that touches the repo.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -417,6 +451,11 @@ is failing — for any reason — is an incomplete deliverable, not a finished o
   cluster and are marked `#[ignore]` so they do not run on a plain `cargo test`.
 - **Verification gate**: a feature is not complete until its tests pass against
   the real code path, not a stub.
+- **Scratch space**: transient artifacts (validation reports, intermediate
+  logs, checkpoint dumps, agent-to-agent handoff files) MUST be written to the
+  git-ignored `.temp/` directory (Principle XII), never to the repository root
+  or any tracked directory. If an artifact must persist beyond the task, promote
+  it to a tracked location (specs, README, source) with an explicit rationale.
 
 ## Governance
 
@@ -431,4 +470,4 @@ is failing — for any reason — is an incomplete deliverable, not a finished o
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.4.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-26
+**Version**: 2.5.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-27
