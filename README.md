@@ -116,23 +116,25 @@ a manual Secret is the fallback).
 kubectl apply -f deploy/webhook-config.yaml
 ```
 
-**6. Set the budget** — create the singleton `Allocation` instance carrying
-`spec.budgetPercent` (here, 80% of total allocatable for each resource):
+**6. Singletons & budget** — you're done. On startup the controllers auto-create
+both singleton instances; **neither needs to be created manually**:
+
+- `cluster-capacity` (`ClusterCapacity`, empty spec) — the supply side, refreshed
+  by the Node Capacity Controller from every node's `.status.allocatable`.
+- `cluster-allocation` (`Allocation`, `spec.budgetPercent: 80`) — the demand side.
+  **80%** is the auto-created default, leaving 20% headroom for system daemons,
+  node overhead, and spikes.
+
+To change the budget at runtime, patch the Allocation spec — see
+[Adjusting the Budget at Runtime](#adjusting-the-budget-at-runtime):
 
 ```sh
-kubectl apply -f - <<'EOF'
-apiVersion: emergency-ration.dev/v1
-kind: Allocation
-metadata:
-  name: cluster-allocation
-spec:
-  budgetPercent: 80
-EOF
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"budgetPercent":70}}'
 ```
 
-The `cluster-capacity` `ClusterCapacity` instance is created and refreshed
-**automatically** by the webhook's Node Capacity Controller (it sums every node's
-`.status.allocatable`). You do not need to create it.
+The controllers never overwrite an existing instance, so any operator-set
+`budgetPercent` is preserved across restarts.
 
 > The webhook `Deployment` pods retry until the RBAC `ServiceAccount` and the TLS
 > `Secret` exist, so it is normal for them to sit in a brief `CreateContainerConfigError`
@@ -266,13 +268,15 @@ type, the webhook falls back to the default rather than failing to start
 **Identity**: `allocations.emergency-ration.dev` (short name `alloc`), API group
 `emergency-ration.dev/v1`, kind `Allocation`. Cluster-scoped singleton, convention
 instance name **`cluster-allocation`**. Source:
-[`src/crd/allocation.rs`](./src/crd/allocation.rs).
+[`src/crd/allocation.rs`](./src/crd/allocation.rs). The instance is auto-created
+by the Allocation Controller with `spec.budgetPercent: 80` if absent, and an
+existing instance is never overwritten (an operator-set budget is preserved).
 
 **Spec** (the only user-configurable field in the system):
 
 | Field | Type | Constraint | Description |
 |-------|------|------------|-------------|
-| `budgetPercent` | integer | 0–100 | Max allocation as % of total allocatable. Applied to CPU and RAM independently. |
+| `budgetPercent` | integer | 0–100 | Max allocation as % of total allocatable. Applied to CPU and RAM independently. **80** is the auto-created default; change it with `kubectl patch` (see [Adjusting the Budget at Runtime](#adjusting-the-budget-at-runtime)). |
 
 **Status** (controller-computed — read-only for operators):
 

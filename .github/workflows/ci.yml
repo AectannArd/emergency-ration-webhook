@@ -128,17 +128,12 @@ jobs:
           fi
       - name: Configure the budget
         run: |
-          # Create both singleton CRD instances the controllers expect.
-          # The Allocation controller patches cluster-allocation status; the
-          # Node Capacity controller patches cluster-capacity status. Both
-          # instances must exist before the controllers can reconcile.
-          kubectl apply -f - <<EOF
-          apiVersion: emergency-ration.dev/v1
-          kind: ClusterCapacity
-          metadata:
-            name: cluster-capacity
-          spec: {}
-          EOF
+          # The Node Capacity Controller now auto-creates the cluster-capacity
+          # singleton, so CI no longer creates it manually (the smoke test
+          # verifies status gets populated without it). The Allocation singleton
+          # is also auto-created by its controller (default budget 80%); we apply
+          # it explicitly here to assert the controller does NOT overwrite an
+          # operator-set value.
           kubectl apply -f - <<EOF
           apiVersion: emergency-ration.dev/v1
           kind: Allocation
@@ -149,29 +144,35 @@ jobs:
           EOF
       - name: Smoke test — a small pod is admitted, an over-budget pod is denied
         run: |
-          # Wait for the controllers to populate the Allocation status before
-          # testing admission. Without this, the webhook has no capacity data
-          # and rejects everything (fail-closed), including the valid pod.
-          echo "Waiting for Allocation status to be populated..."
-          for i in $(seq 1 60); do
-            if kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null | grep -q '[0-9]'; then
-              echo "Allocation status populated."
+          # The controllers auto-create their singletons on startup and write
+          # status within their first reconcile window. Wait for a NON-ZERO
+          # ceiling before admission testing: a zero ceiling is the fail-closed
+          # state (the Node Capacity Controller's supply has not yet propagated
+          # into the Allocation Controller's cache on startup). Matching a bare
+          # "0" would proceed too early and the webhook would deny even the
+          # valid smoke pod. A non-zero ceiling means supply is known and the
+          # system is ready to admit.
+          echo "Waiting for a non-zero Allocation ceiling (capacity known)..."
+          for i in $(seq 1 30); do
+            cpu=$(kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null)
+            mem=$(kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingMemoryBytes}' 2>/dev/null)
+            if [ -n "$cpu" ] && [ "$cpu" -gt 0 ] 2>/dev/null \
+               && [ -n "$mem" ] && [ "$mem" -gt 0 ] 2>/dev/null; then
+              echo "Allocation ready: ceilingCpuMilli=$cpu, ceilingMemoryBytes=$mem (after ${i}s)."
               break
             fi
-            sleep 2
+            sleep 1
           done
 
-          # Debug: dump CRD state if the status was never populated.
-          if ! kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null | grep -q '[0-9]'; then
-            echo "::group::Allocation CRD state (debug — status not populated)"
+          cpu=$(kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null)
+          if [ -z "$cpu" ] || ! [ "$cpu" -gt 0 ] 2>/dev/null; then
+            echo "::group::CRD + controller state (debug — zero/missing ceiling)"
             kubectl get allocation cluster-allocation -o yaml || true
-            echo "::endgroup::"
-            echo "::group::ClusterCapacity CRD state (debug)"
             kubectl get clustercapacity cluster-capacity -o yaml || true
+            kubectl -n capacity-admission logs -l app=capacity-admission-webhook --tail=80 || true
             echo "::endgroup::"
-            echo "::group::Webhook logs (debug — controller not reconciling?)"
-            kubectl -n capacity-admission logs -l app=capacity-admission-webhook --tail=30 || true
-            echo "::endgroup::"
+            echo "ERROR: Allocation ceiling never became non-zero (last ceilingCpuMilli='${cpu:-<empty>}')."
+            exit 1
           fi
 
           # kubectl run --requests was removed in newer kubectl versions;
