@@ -13,7 +13,7 @@
 //! | `capacity_admission_current_allocation{resource}` | gauge | Allocation `allocated*` |
 //! | `capacity_admission_ceiling{resource}` | gauge | Allocation `ceiling*` |
 //!
-//! `resource` ∈ `{cpu, memory}`, `verdict` ∈ `{allow, deny, error}`.
+//! `resource` ∈ `{cpu, memory}`, `verdict` ∈ `{allow, deny, dry_run_deny, error}`.
 
 use prometheus::{
     Encoder, GaugeVec, Histogram, HistogramOpts, IntCounterVec, IntGauge, IntGaugeVec, Opts,
@@ -43,6 +43,10 @@ impl ResourceLabel {
 pub enum VerdictLabel {
     Allow,
     Deny,
+    /// spec-004: a dry-run mode decision that would have denied but admitted
+    /// with a warning. Distinct from `Deny` so dashboards can query
+    /// `verdict="dry_run_deny"` separately or combine with `verdict=~"deny|dry_run_deny"`.
+    DryRunDeny,
     Error,
 }
 
@@ -52,6 +56,7 @@ impl VerdictLabel {
         match self {
             VerdictLabel::Allow => "allow",
             VerdictLabel::Deny => "deny",
+            VerdictLabel::DryRunDeny => "dry_run_deny",
             VerdictLabel::Error => "error",
         }
     }
@@ -91,7 +96,7 @@ impl Metrics {
         let verdicts = IntCounterVec::new(
             Opts::new(
                 "capacity_admission_verdicts_total",
-                "Admission decisions by resource and verdict (allow/deny/error).",
+                "Admission decisions by resource and verdict (allow/deny/dry_run_deny/error).",
             ),
             &["resource", "verdict"],
         )
@@ -168,7 +173,12 @@ impl Metrics {
         // /metrics from startup (a scrape must see the full surface at zero,
         // not an empty response before the first decision).
         for resource in [ResourceLabel::Cpu, ResourceLabel::Memory] {
-            for verdict in [VerdictLabel::Allow, VerdictLabel::Deny, VerdictLabel::Error] {
+            for verdict in [
+                VerdictLabel::Allow,
+                VerdictLabel::Deny,
+                VerdictLabel::DryRunDeny,
+                VerdictLabel::Error,
+            ] {
                 verdicts.with_label_values(&[resource.as_str(), verdict.as_str()]);
             }
             total_allocatable
@@ -294,6 +304,34 @@ mod tests {
                 r#"capacity_admission_verdicts_total{resource="memory",verdict="deny"} 1"#
             ),
             "{text}"
+        );
+    }
+
+    // ---- spec-004: DryRunDeny verdict label ----
+
+    #[test]
+    fn dry_run_deny_verdict_serialises_as_dry_run_deny() {
+        // T022: VerdictLabel::DryRunDeny serialises as "dry_run_deny".
+        assert_eq!(VerdictLabel::DryRunDeny.as_str(), "dry_run_deny");
+    }
+
+    #[test]
+    fn new_pre_creates_dry_run_deny_series_at_zero() {
+        // T023: Metrics::new() pre-creates the dry_run_deny series at zero for
+        // both resources (matching the existing pre-creation pattern).
+        let metrics = Metrics::new();
+        let text = metrics.render();
+        assert!(
+            text.contains(
+                r#"capacity_admission_verdicts_total{resource="cpu",verdict="dry_run_deny"} 0"#
+            ),
+            "cpu dry_run_deny series must be pre-created at zero: {text}"
+        );
+        assert!(
+            text.contains(
+                r#"capacity_admission_verdicts_total{resource="memory",verdict="dry_run_deny"} 0"#
+            ),
+            "memory dry_run_deny series must be pre-created at zero: {text}"
         );
     }
 

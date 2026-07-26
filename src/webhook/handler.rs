@@ -30,6 +30,7 @@ use kube::runtime::reflector::Store;
 
 use crate::crd::{
     Allocation, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME, ClusterCapacity,
+    EnforcementMode, resolve_enforcement_mode,
 };
 use crate::metrics::{CapacityFigures, Metrics, ResourceLabel as MetricResource, VerdictLabel};
 use crate::resources::quantity::{self, QuantityParseError};
@@ -155,10 +156,10 @@ pub async fn handle(body: Bytes, state: &AppState) -> AdmissionResponse {
 
     let mut outcome = match result {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(error)) => reject_outcome(error, &meta, DecisionVerdict::Error),
+        Ok(Err(error)) => reject_outcome(error, &meta, DecisionVerdict::Error, "enforce"),
         // The outer Err is the timeout or panic (InternalError); classify any
         // other unexpected error through the unknown catch-all (T037).
-        Err(error) => reject_outcome(error, &meta, DecisionVerdict::Error),
+        Err(error) => reject_outcome(error, &meta, DecisionVerdict::Error, "enforce"),
     };
     outcome.summary.latency_ms = start.elapsed().as_millis() as i64;
 
@@ -208,15 +209,26 @@ pub fn evaluate(
     let Some(allocation) =
         allocation_store.find(|allocation| allocation.name_any() == CLUSTER_ALLOCATION_NAME)
     else {
+        // No Allocation singleton → no budget and no mode context. Default to
+        // "enforce" for the summary (Principle I rejects regardless of mode).
         return reject_outcome(
             AdmissionError::CapacityDataMissing {
                 which: MissingCapacityData::Allocation,
             },
             &request_meta_of(request),
             DecisionVerdict::Error,
+            "enforce",
         );
     };
     let budget_percent = allocation.spec.budget_percent;
+    // spec-004: resolve the effective enforcement mode from the cached Allocation
+    // spec (None → Enforce, FR-003). The mode is read here, once, and threaded
+    // through every subsequent decision so the summary always carries it. The
+    // fail-closed paths below return BEFORE check_budget, so they reject in both
+    // modes regardless of this value (FR-006 / Principle I) — the mode only
+    // governs the budget Deny branch at the end.
+    let enforcement = resolve_enforcement_mode(allocation.spec.enforcement_mode);
+    let mode_log = enforcement.as_log_str();
     let Some(status) = allocation.status.clone() else {
         return reject_outcome(
             AdmissionError::CapacityDataMissing {
@@ -224,6 +236,7 @@ pub fn evaluate(
             },
             &request_meta_of(request),
             DecisionVerdict::Error,
+            mode_log,
         );
     };
 
@@ -231,7 +244,7 @@ pub fn evaluate(
 
     // T032: enforce the freshness threshold. Data older than the threshold (or
     // with an unparseable timestamp) cannot be authoritatively verified → deny
-    // (Principle I).
+    // (Principle I). This path rejects in both modes (FR-006).
     if freshness.stale {
         return reject_outcome(
             AdmissionError::CapacityDataStale {
@@ -240,11 +253,13 @@ pub fn evaluate(
             },
             &request_meta_of(request),
             DecisionVerdict::Error,
+            mode_log,
         );
     }
 
     // The supply-side cache must also be present; a missing ClusterCapacity
     // means the supply state is not initialised → deny (Error Path Matrix).
+    // Rejects in both modes (FR-006).
     let Some(capacity_status) = capacity_store
         .find(|c| c.name_any() == CLUSTER_CAPACITY_NAME)
         .and_then(|c| c.status.clone())
@@ -255,20 +270,26 @@ pub fn evaluate(
             },
             &request_meta_of(request),
             DecisionVerdict::Error,
+            mode_log,
         );
     };
     let total_cpu = capacity_status.total_allocatable_cpu_milli;
     let total_mem = capacity_status.total_allocatable_memory_bytes;
 
     // Resolve the effective request (figures). A quantity parse failure is
-    // fail-closed (T034).
+    // fail-closed (T034) — rejects in both modes (FR-006).
     let effective = match effective_request(request) {
         Ok(effective) => effective,
         Err(error) => {
-            return reject_outcome(error, &request_meta_of(request), DecisionVerdict::Error)
-                .with_freshness(freshness.seconds)
-                .with_budget(budget_percent)
-                .with_totals(total_cpu, total_mem);
+            return reject_outcome(
+                error,
+                &request_meta_of(request),
+                DecisionVerdict::Error,
+                mode_log,
+            )
+            .with_freshness(freshness.seconds)
+            .with_budget(budget_percent)
+            .with_totals(total_cpu, total_mem);
         }
     };
 
@@ -282,6 +303,7 @@ pub fn evaluate(
                 request,
                 budget_percent,
                 freshness.seconds,
+                enforcement,
                 ResourceFigures::within(
                     ResourceType::Cpu,
                     allocated,
@@ -300,37 +322,71 @@ pub fn evaluate(
             .verdict(DecisionVerdict::Allow),
         },
         AdmissionVerdict::Deny(violations) => {
-            let response = AdmissionError::OverBudget {
-                violations: violations.clone(),
-            }
-            .into_response(&request.uid);
-            DecisionOutcome {
-                response,
-                summary: DecisionSummary::decision(
-                    request,
-                    budget_percent,
-                    freshness.seconds,
-                    ResourceFigures::within(
-                        ResourceType::Cpu,
-                        allocated,
-                        effective,
-                        ceilings,
-                        total_cpu,
-                    )
-                    .mark_over(&violations),
-                    ResourceFigures::within(
-                        ResourceType::Memory,
-                        allocated,
-                        effective,
-                        ceilings,
-                        total_mem,
-                    )
-                    .mark_over(&violations),
+            // The summary carries the same capacity figures a real deny would,
+            // regardless of mode; only the response and verdict differ.
+            let summary = DecisionSummary::decision(
+                request,
+                budget_percent,
+                freshness.seconds,
+                enforcement,
+                ResourceFigures::within(
+                    ResourceType::Cpu,
+                    allocated,
+                    effective,
+                    ceilings,
+                    total_cpu,
                 )
-                .verdict(DecisionVerdict::Deny),
+                .mark_over(&violations),
+                ResourceFigures::within(
+                    ResourceType::Memory,
+                    allocated,
+                    effective,
+                    ceilings,
+                    total_mem,
+                )
+                .mark_over(&violations),
+            );
+            // spec-004: at the budget Deny branch (the ONLY insertion point for
+            // the mode toggle), dry-run converts the rejection into an admit
+            // carrying the would-be rejection as a warning. Enforce keeps the
+            // existing fail-closed rejection. Because every fail-closed path
+            // returns above before reaching check_budget, no error rejection can
+            // be converted (FR-006 / Principle I).
+            match enforcement {
+                EnforcementMode::DryRun => {
+                    let mut response = AdmissionResponse::from(request);
+                    response.warnings = Some(vec![dry_run_warning(&violations)]);
+                    DecisionOutcome {
+                        response,
+                        summary: summary.verdict(DecisionVerdict::DryRunDeny),
+                    }
+                }
+                EnforcementMode::Enforce => {
+                    let response = AdmissionError::OverBudget {
+                        violations: violations.clone(),
+                    }
+                    .into_response(&request.uid);
+                    DecisionOutcome {
+                        response,
+                        summary: summary.verdict(DecisionVerdict::Deny),
+                    }
+                }
             }
         }
     }
+}
+
+/// Build the dry-run admission warning from the budget violations: the same
+/// per-resource message a real rejection carries (data-model.md §7), prefixed
+/// with `"Budget violations (dry-run): "`. When both resources are over budget
+/// both lines are joined with `\n` inside a single warning string.
+fn dry_run_warning(violations: &[BudgetViolation]) -> String {
+    let body = violations
+        .iter()
+        .map(BudgetViolation::message_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Budget violations (dry-run): {body}")
 }
 
 /// Apply the per-request timeout. Elapsed → [`AdmissionError::Timeout`].
@@ -416,6 +472,10 @@ pub struct Freshness {
 pub enum DecisionVerdict {
     Allow,
     Deny,
+    /// spec-004: a dry-run mode decision that would have denied, but instead
+    /// admitted the pod with a warning. Fail-closed paths never produce this —
+    /// the conversion happens only at the `check_budget` Deny branch.
+    DryRunDeny,
     Error,
 }
 
@@ -488,6 +548,9 @@ pub struct DecisionSummary {
     pub budget_percent: i64,
     pub freshness_seconds: i64,
     pub latency_ms: i64,
+    /// spec-004: the active enforcement mode for this decision
+    /// (`"enforce"` / `"dry_run"`). Present on every decision (FR-009).
+    pub enforcement_mode: String,
     pub cpu: ResourceFigures,
     pub memory: ResourceFigures,
 }
@@ -497,6 +560,7 @@ impl DecisionSummary {
         request: &AdmissionRequest<Pod>,
         budget_percent: i32,
         freshness_seconds: i64,
+        enforcement_mode: EnforcementMode,
         cpu: ResourceFigures,
         memory: ResourceFigures,
     ) -> Self {
@@ -508,6 +572,7 @@ impl DecisionSummary {
             budget_percent: budget_percent as i64,
             freshness_seconds,
             latency_ms: 0,
+            enforcement_mode: enforcement_mode.as_log_str().to_string(),
             cpu,
             memory,
         }
@@ -543,11 +608,15 @@ impl DecisionOutcome {
 }
 
 /// Build a fail-closed reject outcome from an [`AdmissionError`] (admit path
-/// never reaches here).
+/// never reaches here). `enforcement_mode` is the mode label for the summary
+/// (FR-009); callers that have an Allocation pass the resolved mode, the
+/// request-layer guards (`handle`) pass `"enforce"` — there is no Allocation
+/// context on a deserialisation/timeout/panic path.
 fn reject_outcome(
     error: AdmissionError,
     meta: &RequestMeta,
     verdict: DecisionVerdict,
+    enforcement_mode: &str,
 ) -> DecisionOutcome {
     let reason = error.slug().to_string();
     let response = error.into_response(&meta.uid);
@@ -561,6 +630,7 @@ fn reject_outcome(
             budget_percent: -1,
             freshness_seconds: -1,
             latency_ms: 0,
+            enforcement_mode: enforcement_mode.to_string(),
             cpu: ResourceFigures::default(),
             memory: ResourceFigures::default(),
         },
@@ -570,8 +640,12 @@ fn reject_outcome(
 /// Emit the structured tracing event(s) for a decision (T026).
 ///
 /// - Admit → one INFO event per resource, with every Logging Contract field.
-/// - Deny → one WARN event per resource (reason names the violated resource).
+/// - Deny / DryRunDeny → one WARN event per resource (reason names the violated
+///   resource). A dry-run deny carries `decision = "dry_run_deny"` so it is
+///   distinguishable from an enforced deny in log aggregators (spec-004, FR-008).
 /// - Error → one ERROR event with the reason/error.
+///
+/// spec-004 (FR-009): every variant carries the active `enforcement_mode`.
 fn emit_log(summary: &DecisionSummary) {
     match summary.verdict {
         DecisionVerdict::Error => {
@@ -580,6 +654,7 @@ fn emit_log(summary: &DecisionSummary) {
                 workload = %summary.workload,
                 operation = %summary.operation,
                 decision = "error",
+                enforcement_mode = %summary.enforcement_mode,
                 reason = %summary.reason,
                 error = %summary.reason,
                 budget_percent = summary.budget_percent,
@@ -595,6 +670,7 @@ fn emit_log(summary: &DecisionSummary) {
                     workload = %summary.workload,
                     operation = %summary.operation,
                     decision = "allow",
+                    enforcement_mode = %summary.enforcement_mode,
                     resource_type = rtype,
                     allocated = figures.allocated,
                     requested = figures.requested,
@@ -607,7 +683,13 @@ fn emit_log(summary: &DecisionSummary) {
                 );
             }
         }
-        DecisionVerdict::Deny => {
+        DecisionVerdict::Deny | DecisionVerdict::DryRunDeny => {
+            // Dry-run deny logs at WARN (same as an enforced deny) but with the
+            // distinct `dry_run_deny` decision label (FR-008).
+            let decision_label: &'static str = match summary.verdict {
+                DecisionVerdict::DryRunDeny => "dry_run_deny",
+                _ => "deny",
+            };
             for (rtype, figures) in [("cpu", &summary.cpu), ("memory", &summary.memory)] {
                 let reason = if figures.over {
                     format!("{rtype}_over_budget")
@@ -618,7 +700,8 @@ fn emit_log(summary: &DecisionSummary) {
                     target: "capacity_admission",
                     workload = %summary.workload,
                     operation = %summary.operation,
-                    decision = "deny",
+                    decision = decision_label,
+                    enforcement_mode = %summary.enforcement_mode,
                     resource_type = rtype,
                     reason = %reason,
                     allocated = figures.allocated,
@@ -646,6 +729,9 @@ fn record_metrics(metrics: &Metrics, summary: &DecisionSummary) {
     ] {
         let verdict = match summary.verdict {
             DecisionVerdict::Error => VerdictLabel::Error,
+            // spec-004: a dry-run would-be-deny records its own label so the
+            // verdict counter distinguishes shadow admits from enforced denies.
+            DecisionVerdict::DryRunDeny => VerdictLabel::DryRunDeny,
             _ if figures.over => VerdictLabel::Deny,
             _ => VerdictLabel::Allow,
         };
@@ -850,7 +936,7 @@ fn request_meta_from_value(value: &serde_json::Value) -> RequestMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{Allocation, AllocationSpec, AllocationStatus};
+    use crate::crd::{Allocation, AllocationSpec, AllocationStatus, EnforcementMode};
     use crate::time_util::parse_rfc3339;
     use k8s_openapi::api::core::v1::{Container, PodSpec, ResourceRequirements};
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -925,7 +1011,10 @@ mod tests {
     fn allocation_with(status: AllocationStatus) -> Allocation {
         let mut a = Allocation::new(
             CLUSTER_ALLOCATION_NAME,
-            AllocationSpec { budget_percent: 80 },
+            AllocationSpec {
+                budget_percent: 80,
+                enforcement_mode: None,
+            },
         );
         a.status = Some(status);
         a
@@ -959,6 +1048,15 @@ mod tests {
     fn populated_store() -> Store<Allocation> {
         let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
         writer.apply_watcher_event(&watcher::Event::Apply(allocation_with(status())));
+        store
+    }
+
+    /// A populated Allocation store with the singleton in `mode` (spec-004).
+    fn populated_store_with_mode(mode: EnforcementMode) -> Store<Allocation> {
+        let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+        let mut allocation = allocation_with(status());
+        allocation.spec.enforcement_mode = Some(mode);
+        writer.apply_watcher_event(&watcher::Event::Apply(allocation));
         store
     }
 
@@ -1068,6 +1166,202 @@ mod tests {
         assert_eq!(outcome.summary.cpu.ceiling, 80_000);
         assert!(outcome.summary.cpu.over);
         assert!(!outcome.summary.memory.over);
+    }
+
+    // ---- spec-004: dry-run shadow evaluation (US1) ----
+
+    #[test]
+    fn evaluate_dry_run_admits_over_budget_with_warning() {
+        // T010: dry-run converts an over-budget deny to an admit carrying the
+        // would-be rejection as a warning (allowed == true).
+        let req = request(&pod("15", "1"), Operation::Create, None);
+        let outcome = evaluate(
+            &req,
+            &populated_store_with_mode(EnforcementMode::DryRun),
+            &populated_capacity_store(),
+            now(),
+            30,
+        );
+        assert!(
+            outcome.response.allowed,
+            "dry-run mode admits over-budget pods"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::DryRunDeny);
+        assert_eq!(
+            outcome.summary.enforcement_mode, "dry_run",
+            "summary carries the active enforcement mode"
+        );
+        // The same figures a real deny would carry.
+        assert!(outcome.summary.cpu.over);
+        assert_eq!(outcome.summary.cpu.projected, 85_000);
+        let warnings = outcome
+            .response
+            .warnings
+            .as_ref()
+            .expect("dry-run admit carries a warning");
+        assert_eq!(warnings.len(), 1, "one warning string");
+        assert!(
+            warnings[0].starts_with("Budget violations (dry-run): "),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("CPU budget exceeded"),
+            "warning reuses the rejection message: {warnings:?}"
+        );
+        assert!(warnings[0].contains("projected 85000m"), "{warnings:?}");
+    }
+
+    #[test]
+    fn evaluate_enforce_rejects_over_budget_unchanged() {
+        // T011: enforce mode rejects an over-budget pod (existing behaviour).
+        let req = request(&pod("15", "1"), Operation::Create, None);
+        let outcome = evaluate(
+            &req,
+            &populated_store_with_mode(EnforcementMode::Enforce),
+            &populated_capacity_store(),
+            now(),
+            30,
+        );
+        assert!(
+            !outcome.response.allowed,
+            "enforce mode rejects over-budget"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Deny);
+        assert_eq!(outcome.summary.enforcement_mode, "enforce");
+        assert!(
+            outcome.response.warnings.is_none(),
+            "an enforce deny carries no warning"
+        );
+    }
+
+    #[test]
+    fn evaluate_dry_run_admits_within_budget_without_warning() {
+        // T012: dry-run admits a within-budget pod normally (no warning, Allow).
+        let req = request(&pod("5", "1Ki"), Operation::Create, None);
+        let outcome = evaluate(
+            &req,
+            &populated_store_with_mode(EnforcementMode::DryRun),
+            &populated_capacity_store(),
+            now(),
+            30,
+        );
+        assert!(outcome.response.allowed);
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Allow);
+        assert_eq!(outcome.summary.enforcement_mode, "dry_run");
+        assert!(
+            outcome.response.warnings.is_none(),
+            "a within-budget admit carries no warning"
+        );
+    }
+
+    // ---- spec-004: fail-closed paths reject in dry-run mode too (US2) ----
+    //
+    // The dry-run conversion happens ONLY at the check_budget Deny branch. Every
+    // error path returns before check_budget is reached, so it is structurally
+    // impossible for dry-run to convert an error rejection (FR-006 / Principle I).
+    // These tests verify that architectural guarantee holds under dry-run mode.
+
+    #[test]
+    fn dry_run_rejects_stale_capacity_data() {
+        // T018: stale data rejects even in dry-run mode.
+        let req = request(&pod("15", "1"), Operation::Create, None);
+        let outcome = evaluate(
+            &req,
+            &populated_store_with_mode(EnforcementMode::DryRun),
+            &populated_capacity_store(),
+            now() + 60, // 60s older than the 30s threshold → stale
+            30,
+        );
+        assert!(
+            !outcome.response.allowed,
+            "stale capacity data must reject in dry-run mode (FR-006)"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+        assert_eq!(outcome.summary.reason, "capacity_data_stale");
+        assert!(
+            outcome.response.warnings.is_none(),
+            "a fail-closed reject carries no warning even in dry-run"
+        );
+    }
+
+    #[test]
+    fn dry_run_rejects_missing_allocation_singleton() {
+        // T019: a missing Allocation singleton rejects in dry-run mode. The mode
+        // lives on the Allocation spec, so a missing instance cannot be dry-run —
+        // the fail-closed path is reached before any mode resolution.
+        let req = request(&pod("15", "1"), Operation::Create, None);
+        let (empty, _writer) = kube::runtime::reflector::store::<Allocation>();
+        let outcome = evaluate(&req, &empty, &populated_capacity_store(), now(), 30);
+        assert!(
+            !outcome.response.allowed,
+            "missing Allocation must reject in dry-run mode (FR-006)"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+        assert_eq!(outcome.summary.reason, "capacity_data_missing");
+    }
+
+    #[test]
+    fn dry_run_rejects_missing_cluster_capacity() {
+        // T020: a missing ClusterCapacity rejects in dry-run mode.
+        let req = request(&pod("15", "1"), Operation::Create, None);
+        let outcome = evaluate(
+            &req,
+            &populated_store_with_mode(EnforcementMode::DryRun),
+            &empty_capacity_store(),
+            now(),
+            30,
+        );
+        assert!(
+            !outcome.response.allowed,
+            "missing ClusterCapacity must reject in dry-run mode (FR-006)"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+        assert_eq!(outcome.summary.reason, "capacity_data_missing");
+    }
+
+    // ---- spec-004: record_metrics maps DryRunDeny (US3) ----
+
+    #[test]
+    fn record_metrics_maps_dry_run_deny_to_dry_run_deny_label() {
+        // T024: a DryRunDeny decision records the dry_run_deny verdict label,
+        // distinct from a plain deny.
+        let metrics = Metrics::new();
+        let summary = DecisionSummary {
+            workload: "default/p".to_string(),
+            operation: "CREATE".to_string(),
+            verdict: DecisionVerdict::DryRunDeny,
+            reason: "cpu_over_budget".to_string(),
+            budget_percent: 80,
+            freshness_seconds: 0,
+            latency_ms: 1,
+            enforcement_mode: "dry_run".to_string(),
+            cpu: ResourceFigures {
+                resource: ResourceType::Cpu,
+                allocated: 70_000,
+                requested: 15_000,
+                projected: 85_000,
+                ceiling: 80_000,
+                total_allocatable: 100_000,
+                over: true,
+            },
+            memory: ResourceFigures {
+                resource: ResourceType::Memory,
+                ..ResourceFigures::default()
+            },
+        };
+        record_metrics(&metrics, &summary);
+        let text = metrics.render();
+        assert!(
+            text.contains(
+                r#"capacity_admission_verdicts_total{resource="cpu",verdict="dry_run_deny"} 1"#
+            ),
+            "DryRunDeny must bump the dry_run_deny series: {text}"
+        );
+        // The dry-run admit must NOT also bump the plain deny series.
+        assert!(
+            text.contains(r#"capacity_admission_verdicts_total{resource="cpu",verdict="deny"} 0"#),
+            "dry-run deny must not bump the enforced deny series: {text}"
+        );
     }
 
     #[test]
