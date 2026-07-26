@@ -142,13 +142,26 @@ jobs:
           # testing admission. Without this, the webhook has no capacity data
           # and rejects everything (fail-closed), including the valid pod.
           echo "Waiting for Allocation status to be populated..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null | grep -q '[0-9]'; then
               echo "Allocation status populated."
               break
             fi
             sleep 2
           done
+
+          # Debug: dump CRD state if the status was never populated.
+          if ! kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null | grep -q '[0-9]'; then
+            echo "::group::Allocation CRD state (debug — status not populated)"
+            kubectl get allocation cluster-allocation -o yaml || true
+            echo "::endgroup::"
+            echo "::group::ClusterCapacity CRD state (debug)"
+            kubectl get clustercapacity cluster-capacity -o yaml || true
+            echo "::endgroup::"
+            echo "::group::Webhook logs (debug — controller not reconciling?)"
+            kubectl -n capacity-admission logs -l app=capacity-admission-webhook --tail=30 || true
+            echo "::endgroup::"
+          fi
 
           # kubectl run --requests was removed in newer kubectl versions;
           # apply explicit Pod manifests instead.
