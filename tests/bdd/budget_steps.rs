@@ -101,5 +101,5 @@ async fn message_contains(world: &mut BudgetWorld, fragment: String) {
 
 #[tokio::main]
 async fn main() {
-    BudgetWorld::run("tests/bdd/features").await;
+    BudgetWorld::run("tests/bdd/features/budget_enforcement.feature").await;
 }
