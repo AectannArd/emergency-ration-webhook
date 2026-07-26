@@ -113,6 +113,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // HTTPS admission server + plaintext HTTP metrics/probe server, sharing one
     // shutdown handle.
+    //
+    // rustls 0.23 requires an explicit process-level CryptoProvider when the
+    // crate is built with multiple crypto backends (or when the selection
+    // cannot be inferred at link time). We enable the "ring" feature in
+    // Cargo.toml; install it as the default before constructing any Rustls
+    // config so the provider panic never fires at runtime.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install ring CryptoProvider");
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
         &config.tls_cert_file,
         &config.tls_key_file,
