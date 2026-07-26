@@ -8,6 +8,43 @@ use serde::{Deserialize, Serialize};
 /// Singleton instance name enforced by convention (one per cluster).
 pub const CLUSTER_ALLOCATION_NAME: &str = "cluster-allocation";
 
+/// The enforcement mode of the capacity admission webhook (spec-004).
+///
+/// `Enforce` (the default, fail-closed behaviour) rejects pods that exceed the
+/// budget. `DryRun` admits over-budget pods, surfacing the would-be rejection as
+/// an admission warning instead; fail-closed paths still reject in both modes
+/// (FR-006 / Constitution Principle I). Serialises kebab-case so the JSON values
+/// are `"enforce"` and `"dry-run"` — exactly what operators type in `kubectl patch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnforcementMode {
+    /// Reject pods that exceed the budget (the default, fail-closed behaviour).
+    Enforce,
+    /// Admit pods that exceed the budget, surfacing the would-be rejection as an
+    /// admission warning. Fail-closed paths still reject.
+    DryRun,
+}
+
+impl EnforcementMode {
+    /// Lower-case label value used in structured logs and metrics fields
+    /// (`"enforce"` / `"dry_run"`). Note the log form uses a snake-case
+    /// `dry_run` to match the `dry_run_deny` verdict label, distinct from the
+    /// kebab-case CRD value `"dry-run"`.
+    pub fn as_log_str(self) -> &'static str {
+        match self {
+            EnforcementMode::Enforce => "enforce",
+            EnforcementMode::DryRun => "dry_run",
+        }
+    }
+}
+
+/// Resolve the effective enforcement mode, defaulting to `Enforce` for an absent
+/// value (FR-003). The field is optional on the CRD spec, so a pre-feature
+/// Allocation instance (no `enforcementMode`) is treated as `enforce`.
+pub fn resolve_enforcement_mode(mode: Option<EnforcementMode>) -> EnforcementMode {
+    mode.unwrap_or(EnforcementMode::Enforce)
+}
+
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[kube(
@@ -26,6 +63,13 @@ pub struct AllocationSpec {
     /// (0–100). Applied to both CPU and RAM independently.
     #[schemars(range(min = 0, max = 100))]
     pub budget_percent: i32,
+
+    /// Enforcement mode: `enforce` (default) or `dry-run` (spec-004). When
+    /// absent, the webhook treats the singleton as `enforce` (FR-003) via
+    /// [`resolve_enforcement_mode`]. The Allocation Controller seeds
+    /// `Some(EnforcementMode::Enforce)` on auto-creation (FR-010) and never
+    /// touches the field afterwards — enforcement is a webhook concern.
+    pub enforcement_mode: Option<EnforcementMode>,
 }
 
 /// Status of the Allocation CRD, populated by the Allocation Controller.
@@ -109,5 +153,79 @@ mod tests {
         assert!(json.get("ceilingMemoryBytes").is_some());
         assert!(json.get("utilizationPercentCpu").is_some());
         assert!(json.get("lastUpdated").is_some());
+    }
+
+    // ---- spec-004: EnforcementMode enum + resolution helper ----
+
+    #[test]
+    fn enforcement_mode_serialises_kebab_case() {
+        // T001: serialises as "enforce" and "dry-run" (kebab-case) and round-trips.
+        assert_eq!(
+            serde_json::to_string(&EnforcementMode::Enforce).unwrap(),
+            r#""enforce""#
+        );
+        assert_eq!(
+            serde_json::to_string(&EnforcementMode::DryRun).unwrap(),
+            r#""dry-run""#
+        );
+        let enforce: EnforcementMode = serde_json::from_str(r#""enforce""#).unwrap();
+        let dry_run: EnforcementMode = serde_json::from_str(r#""dry-run""#).unwrap();
+        assert_eq!(enforce, EnforcementMode::Enforce);
+        assert_eq!(dry_run, EnforcementMode::DryRun);
+    }
+
+    #[test]
+    fn resolve_enforcement_mode_defaults_to_enforce_for_none() {
+        // T002: None -> Enforce (FR-003); Some(DryRun) -> DryRun.
+        assert_eq!(
+            resolve_enforcement_mode(None),
+            EnforcementMode::Enforce,
+            "absent enforcement mode must resolve to Enforce (FR-003)"
+        );
+        assert_eq!(
+            resolve_enforcement_mode(Some(EnforcementMode::DryRun)),
+            EnforcementMode::DryRun
+        );
+        assert_eq!(
+            resolve_enforcement_mode(Some(EnforcementMode::Enforce)),
+            EnforcementMode::Enforce
+        );
+    }
+
+    #[test]
+    fn crd_schema_has_optional_enforcement_mode_enum() {
+        // T003: enforcementMode is an optional string enum field (not in required).
+        let crd = Allocation::crd();
+        let v = serde_json::to_value(&crd).unwrap();
+        let enforcement = v
+            .pointer(
+                "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/enforcementMode",
+            )
+            .expect("enforcementMode schema present");
+        assert_eq!(
+            enforcement.get("type").and_then(|t| t.as_str()),
+            Some("string"),
+            "enforcementMode is a string-typed field"
+        );
+        let enum_values = enforcement
+            .get("enum")
+            .and_then(|e| e.as_array())
+            .expect("enforcementMode is an enum");
+        let values: Vec<String> = enum_values
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(values.contains(&"enforce".to_string()), "{values:?}");
+        assert!(values.contains(&"dry-run".to_string()), "{values:?}");
+        // Optional: enforcementMode must NOT appear in the spec `required` array.
+        let required = v
+            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/required")
+            .and_then(|r| r.as_array());
+        let lists_enforcement =
+            required.is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("enforcementMode")));
+        assert!(
+            !lists_enforcement,
+            "enforcementMode must be optional, not required (FR-003)"
+        );
     }
 }

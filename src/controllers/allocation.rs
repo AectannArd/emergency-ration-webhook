@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::crd::{
     Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
-    ClusterCapacity,
+    ClusterCapacity, EnforcementMode,
 };
 use crate::resources::quantity::extract_pod_requests;
 use crate::time_util::now_rfc3339;
@@ -139,13 +139,16 @@ fn classify_create<T>(result: &Result<T, kube::Error>) -> CreateOutcome {
 }
 
 /// The default `cluster-allocation` instance created when the singleton is
-/// absent: the only user-configurable field, `budgetPercent`, is seeded with
-/// [`DEFAULT_BUDGET_PERCENT`]. An operator can patch it afterwards.
+/// absent: the only user-configurable fields, `budgetPercent` and
+/// `enforcementMode`, are seeded with [`DEFAULT_BUDGET_PERCENT`] and
+/// `enforce` (FR-010) so a fresh cluster starts in the fail-closed enforcement
+/// mode. An operator can patch both afterwards.
 fn default_allocation_singleton() -> Allocation {
     Allocation::new(
         CLUSTER_ALLOCATION_NAME,
         AllocationSpec {
             budget_percent: DEFAULT_BUDGET_PERCENT,
+            enforcement_mode: Some(EnforcementMode::Enforce),
         },
     )
 }
@@ -423,7 +426,10 @@ mod tests {
         // The operator set budgetPercent=50; the controller must NOT overwrite it.
         let lookup: Result<Allocation, kube::Error> = Ok(Allocation::new(
             CLUSTER_ALLOCATION_NAME,
-            AllocationSpec { budget_percent: 50 },
+            AllocationSpec {
+                budget_percent: 50,
+                enforcement_mode: None,
+            },
         ));
         assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
     }
@@ -467,6 +473,11 @@ mod tests {
         assert_eq!(
             alloc.spec.budget_percent, DEFAULT_BUDGET_PERCENT,
             "auto-created singleton seeds a safe default budget"
+        );
+        assert_eq!(
+            alloc.spec.enforcement_mode,
+            Some(EnforcementMode::Enforce),
+            "auto-created singleton seeds enforce mode (FR-010)"
         );
     }
 
@@ -514,7 +525,10 @@ mod tests {
         // instance. ensure_singleton must NOT overwrite it (no create).
         let existing = Allocation::new(
             CLUSTER_ALLOCATION_NAME,
-            AllocationSpec { budget_percent: 50 },
+            AllocationSpec {
+                budget_percent: 50,
+                enforcement_mode: None,
+            },
         );
         let (req, respond) = handle.next_request().await.expect("existence GET");
         assert_eq!(req.method().as_str(), "GET");
