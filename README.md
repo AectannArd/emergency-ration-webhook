@@ -272,11 +272,12 @@ instance name **`cluster-allocation`**. Source:
 by the Allocation Controller with `spec.budgetPercent: 80` if absent, and an
 existing instance is never overwritten (an operator-set budget is preserved).
 
-**Spec** (the only user-configurable field in the system):
+**Spec** (the user-configurable fields):
 
 | Field | Type | Constraint | Description |
 |-------|------|------------|-------------|
 | `budgetPercent` | integer | 0–100 | Max allocation as % of total allocatable. Applied to CPU and RAM independently. **80** is the auto-created default; change it with `kubectl patch` (see [Adjusting the Budget at Runtime](#adjusting-the-budget-at-runtime)). |
+| `enforcementMode` | string enum | `enforce` \| `dry-run` | Enforcement mode (spec-004). `enforce` (default) rejects over-budget pods; `dry-run` admits them with a warning instead. Fail-closed paths reject in both modes. Absent → `enforce`. See [Enforcement Modes](#enforcement-modes-enforce--dry-run). |
 
 **Status** (controller-computed — read-only for operators):
 
@@ -323,6 +324,51 @@ The Allocation Controller recomputes the per-resource ceilings (`floor(total ×
 budgetPercent / 100)`) within its reconcile window and the webhook picks up the
 new ceilings on the next decision.
 
+### Enforcement Modes (Enforce / Dry-Run)
+
+The webhook has two enforcement modes, toggled by the optional
+`spec.enforcementMode` field on the Allocation singleton (spec-004). Like
+`budgetPercent`, the mode is read from the webhook's in-process cache, so a spec
+patch takes effect on subsequent decisions **without a restart** (FR-002).
+
+| Value | Behaviour |
+|-------|-----------|
+| `enforce` *(default)* | Over-budget pods are **rejected** (`allowed: false`, HTTP 403). This is the fail-closed budget guardian. |
+| `dry-run` | Over-budget pods are **admitted** (`allowed: true`) carrying the would-be rejection as an admission **warning**, so the webhook can be installed in an audit / shadow configuration. Within-budget pods are admitted normally; fail-closed paths still reject (see below). |
+
+Absent or unrecognised values resolve to `enforce` (FR-003). The auto-created
+singleton seeds `enforcementMode: enforce` (FR-010).
+
+**Fail-closed paths reject in both modes** (Constitution Principle I,
+NON-NEGOTIABLE). Dry-run converts **only** over-budget denials — it never
+converts an error rejection. When capacity data is stale or missing, the request
+is malformed, a quantity cannot be parsed, or the decision times out or panics,
+the webhook rejects regardless of the mode (see [Failure Modes](#failure-modes)).
+
+Switch the mode at runtime with `kubectl patch`:
+
+```sh
+# Enter dry-run (admit over-budget pods with a warning).
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"enforcementMode":"dry-run"}}'
+
+# Confirm it took effect.
+kubectl get allocation cluster-allocation -o jsonpath='{.spec.enforcementMode}'
+# → dry-run
+
+# Return to enforce (reject over-budget pods).
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"enforcementMode":"enforce"}}'
+```
+
+In dry-run mode an over-budget `kubectl run` reports a `Warning` (the
+would-be rejection message, prefixed `Budget violations (dry-run):`) while the
+pod is still created. A dry-run decision is logged as `decision=dry_run_deny`
+and counted under the `verdict="dry_run_deny"` metric series (see
+[Structured Logging](#structured-logging) and
+[Prometheus Metrics](#prometheus-metrics)). Validation scenarios for both modes
+are in [`specs/004-dry-run-mode/quickstart.md`](./specs/004-dry-run-mode/quickstart.md).
+
 ### Budget Edge Cases
 
 - **`budgetPercent: 0`** is a **circuit-breaker**: the ceiling is `0` for both
@@ -364,11 +410,11 @@ All metrics are registered on a single registry and prefixed
 `capacity_admission_` (source: [`src/metrics.rs`](./src/metrics.rs)). Every series
 is pre-created at startup, so a scrape sees the full surface at zero before the
 first decision. Label vocabularies: `resource ∈ {cpu, memory}`,
-`verdict ∈ {allow, deny, error}`.
+`verdict ∈ {allow, deny, dry_run_deny, error}`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `capacity_admission_verdicts_total` | counter | `resource`, `verdict` | Admission decisions by resource and verdict (allow/deny/error) |
+| `capacity_admission_verdicts_total` | counter | `resource`, `verdict` | Admission decisions by resource and verdict (allow/deny/dry_run_deny/error). `dry_run_deny` is a dry-run mode would-be-rejection (spec-004); query `verdict=~"deny\|dry_run_deny"` for the combined view |
 | `capacity_admission_decision_duration_seconds` | histogram | — | Admission decision latency (seconds). Buckets: 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 1.0 |
 | `capacity_admission_capacity_freshness_seconds` | gauge | — | Seconds since the Allocation CRD status was last refreshed |
 | `capacity_admission_allocation_ratio` | gauge | `resource` | Allocated / ceiling ratio per resource (0.0–1.0+) |
@@ -398,16 +444,19 @@ identity, the decision, and the capacity figures used. Key fields:
 |-------|---------|
 | `workload` | `<namespace>/<name>` of the triggering workload |
 | `operation` | `CREATE`, `UPDATE`, `DELETE`, or `CONNECT` |
-| `decision` | `allow`, `deny`, or `error` |
+| `decision` | `allow`, `deny`, `dry_run_deny` (spec-004), or `error` |
 | `resource_type` | `cpu` or `memory` (one event per resource on allow/deny) |
 | `allocated` / `requested` / `projected` / `ceiling` | Capacity figures for the resource |
 | `budget_percent` | The active `budgetPercent` used for the decision |
+| `enforcement_mode` | The active `enforcementMode` for the decision — `enforce` or `dry_run` (spec-004; present on every decision) |
 | `freshness_seconds` | Age of the cached Allocation status |
 | `latency_ms` | Decision latency in milliseconds |
-| `reason` | On `deny`: `<resource>_over_budget`; on `error`: the failure slug |
+| `reason` | On `deny`/`dry_run_deny`: `<resource>_over_budget`; on `error`: the failure slug |
 
 - An **allow** logs at INFO (one event per resource).
 - A **deny** logs at WARN (one event per resource, `reason` names the violated resource).
+- A **dry_run_deny** logs at WARN with `decision=dry_run_deny` — a dry-run mode
+  would-be-rejection (the pod was admitted with a warning; spec-004).
 - An **error** logs at ERROR with the failure `reason`.
 
 Example (admission allowed, CPU line):
@@ -453,16 +502,21 @@ rather than admitting under uncertainty (Constitution Principle I). The
 itself rejects if the webhook is unreachable. There is no best-effort or
 silent-admit path.
 
+**Every fail-closed path below rejects in both enforcement modes** (FR-006 /
+spec-004): dry-run converts **only** over-budget denials, never error rejections.
+The one mode-sensitive row is the budget over-commit itself — see the last row.
+
 | Condition | Outcome | Logged reason (`reason` slug) · HTTP |
 |-----------|---------|--------------------------------------|
-| Capacity data stale (age > freshness timeout) | Reject | `capacity_data_stale` · 500 |
-| `ClusterCapacity` or `Allocation` CRD not populated | Reject | `capacity_data_missing` · 500 |
-| Capacity state not initialised (controller cold start / empty caches) | Reject | `capacity_data_missing` · 500 |
-| Malformed / undeserialisable admission request | Reject | `deserialisation_failure` · 400 |
-| Unparseable resource quantity in the pod spec | Reject | `quantity_parse_failure` · 400 |
-| Decision timeout exceeded | Reject | `timeout` · 500 |
-| Internal panic / unknown error (catch-all) | Reject | `internal_error` / `unknown` · 500 |
-| Pod projected allocation over the budget | Reject | `over_budget` · 403 |
+| Capacity data stale (age > freshness timeout) | Reject (both modes) | `capacity_data_stale` · 500 |
+| `ClusterCapacity` or `Allocation` CRD not populated | Reject (both modes) | `capacity_data_missing` · 500 |
+| Capacity state not initialised (controller cold start / empty caches) | Reject (both modes) | `capacity_data_missing` · 500 |
+| Malformed / undeserialisable admission request | Reject (both modes) | `deserialisation_failure` · 400 |
+| Unparseable resource quantity in the pod spec | Reject (both modes) | `quantity_parse_failure` · 400 |
+| Decision timeout exceeded | Reject (both modes) | `timeout` · 500 |
+| Internal panic / unknown error (catch-all) | Reject (both modes) | `internal_error` / `unknown` · 500 |
+| Pod projected allocation over the budget — `enforce` | Reject | `over_budget` · 403 |
+| Pod projected allocation over the budget — `dry-run` | **Admit** with a warning (`dry_run_deny` · `verdict="dry_run_deny"`) | `over_budget` (WARN) |
 
 Source: [`src/webhook/error.rs`](./src/webhook/error.rs) (variant → message/code
 mapping) and [`src/webhook/handler.rs`](./src/webhook/handler.rs) (the

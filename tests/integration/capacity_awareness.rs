@@ -47,7 +47,10 @@ fn populated_allocation_store() -> Store<Allocation> {
     let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
     let mut allocation = Allocation::new(
         CLUSTER_ALLOCATION_NAME,
-        AllocationSpec { budget_percent: 80 },
+        AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+        },
     );
     allocation.status = Some(allocation_status());
     writer.apply_watcher_event(&watcher::Event::Apply(allocation));

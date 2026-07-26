@@ -29,6 +29,10 @@ name = "fail_safe"
 path = "tests/integration/fail_safe.rs"
 
 [[test]]
+name = "dry_run"
+path = "tests/integration/dry_run.rs"
+
+[[test]]
 name = "performance"
 path = "tests/integration/performance.rs"
 
@@ -45,6 +49,11 @@ harness = false
 [[test]]
 name = "fail_safe_bdd"
 path = "tests/bdd/steps/fail_safe_steps.rs"
+harness = false
+
+[[test]]
+name = "dry_run_bdd"
+path = "tests/bdd/steps/dry_run_steps.rs"
 harness = false
 
 [dependencies]

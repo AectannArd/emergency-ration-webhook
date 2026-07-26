@@ -36,7 +36,10 @@ async fn admission_decision_meets_latency_targets() {
     let (allocation_store, mut alloc_writer) = kube::runtime::reflector::store::<Allocation>();
     let mut allocation = Allocation::new(
         CLUSTER_ALLOCATION_NAME,
-        AllocationSpec { budget_percent: 80 },
+        AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+        },
     );
     allocation.status = Some(AllocationStatus {
         allocated_cpu_milli: 70_000,

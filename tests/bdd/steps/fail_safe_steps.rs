@@ -113,6 +113,7 @@ impl FailSafeWorld {
                 CLUSTER_ALLOCATION_NAME,
                 AllocationSpec {
                     budget_percent: self.budget_percent,
+                    enforcement_mode: None,
                 },
             );
             a.status = Some(AllocationStatus {

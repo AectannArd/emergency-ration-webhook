@@ -45,7 +45,10 @@ fn status_aged(clock_now: i64, age_secs: i64) -> AllocationStatus {
 fn allocation_with(status: AllocationStatus) -> Allocation {
     let mut a = Allocation::new(
         CLUSTER_ALLOCATION_NAME,
-        AllocationSpec { budget_percent: 80 },
+        AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+        },
     );
     a.status = Some(status);
     a

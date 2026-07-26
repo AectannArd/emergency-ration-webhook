@@ -88,6 +88,16 @@ spec:
                     allocatable capacity (0–100). Applied to both CPU and RAM
                     independently. 0 rejects all requests; 100 only rejects
                     genuine overcommit beyond physical capacity.
+                enforcementMode:
+                  type: string
+                  nullable: true
+                  enum: ["enforce", "dry-run"]
+                  description: >
+                    Enforcement mode. When 'dry-run', over-budget pods are
+                    admitted with a warning instead of rejected; fail-closed paths
+                    (stale/missing capacity data, malformed request, timeout,
+                    panic) still reject in both modes. Defaults to 'enforce' when
+                    absent.
             status:
               type: object
               properties:

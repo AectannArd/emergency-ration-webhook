@@ -44,7 +44,10 @@ fn populated_store() -> Store<Allocation> {
     let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
     let mut allocation = Allocation::new(
         CLUSTER_ALLOCATION_NAME,
-        AllocationSpec { budget_percent: 80 },
+        AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+        },
     );
     allocation.status = Some(spec_allocation_status());
     writer.apply_watcher_event(&watcher::Event::Apply(allocation));
@@ -195,7 +198,10 @@ async fn scenario3_pod_exactly_at_ceiling_is_admitted() {
     let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
     let mut allocation = Allocation::new(
         CLUSTER_ALLOCATION_NAME,
-        AllocationSpec { budget_percent: 80 },
+        AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+        },
     );
     allocation.status = Some(status);
     writer.apply_watcher_event(&watcher::Event::Apply(allocation));
