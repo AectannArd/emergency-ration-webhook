@@ -91,8 +91,35 @@ The Allocation Controller:
 - `get`, `list`, `watch` on `pods` (core/v1).
 - `get`, `list`, `watch` on `clustercapacities` (the controller reads
   ClusterCapacity status to compute the ceiling).
-- `get`, `list`, `watch`, `update`, `patch` on `allocations`
-  (the `.status` subresource).
+- `get`, `list`, `watch`, `create` on `allocations` (the controller auto-creates
+  the `cluster-allocation` singleton).
+- `get`, `update`, `patch` on `allocations/status` (the `.status` subresource).
+
+---
+
+## Singleton Lifecycle
+
+The Allocation Controller owns the `cluster-allocation` singleton's existence.
+On startup (`run`, before the recompute ticker loop) it runs an idempotent
+get-or-create:
+
+1. `GET cluster-allocation` — if present, the controller leaves it **untouched**,
+   preserving any operator-set `spec.budgetPercent`, and proceeds to recompute.
+2. If the apiserver returns **404 NotFound**, the controller `POST`s a new
+   `Allocation` named `cluster-allocation` with
+   `spec.budgetPercent: 80` (the safe default; see [Spec](#spec)).
+3. A **409 AlreadyExists** on the create (e.g. another replica won the race) is
+   treated as success — the singleton exists either way.
+4. Any other error is logged; the controller retries on the next tick.
+
+The controller **never overwrites an existing instance**: an operator-set
+`budgetPercent` is preserved across restarts and reconciles. If the singleton is
+deleted while the controller is running, `recompute` 404s on its budget GET,
+recreates the instance (step 2), and lets the next tick read the fresh budget.
+
+This autocreation is required because `recompute` skips writing status when no
+budget is present; without it the webhook has no capacity data and fails closed
+on every admission (Constitution Principle I).
 
 ---
 

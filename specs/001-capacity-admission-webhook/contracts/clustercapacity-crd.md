@@ -70,8 +70,36 @@ The Node Capacity Controller:
 
 **RBAC**: The controller's service account requires:
 - `get`, `list`, `watch` on `nodes` (core/v1).
-- `get`, `list`, `watch`, `update`, `patch` on `clustercapacities`
-  (the `.status` subresource).
+- `get`, `list`, `watch`, `create` on `clustercapacities` (the controller
+  auto-creates the `cluster-capacity` singleton).
+- `get`, `update`, `patch` on `clustercapacities/status` (the `.status`
+  subresource).
+
+---
+
+## Singleton Lifecycle
+
+The Node Capacity Controller owns the `cluster-capacity` singleton's existence.
+On startup (`run`, before the node reflector loop) it runs an idempotent
+get-or-create:
+
+1. `GET cluster-capacity` — if present, the controller leaves it untouched and
+   proceeds to patch its status.
+2. If the apiserver returns **404 NotFound**, the controller `POST`s a new
+   `ClusterCapacity` named `cluster-capacity` with an empty `spec` (`{}`).
+3. A **409 AlreadyExists** on the create (e.g. another replica won the race) is
+   treated as success — the singleton exists either way.
+4. Any other error is logged; the controller retries on the next node event.
+
+If the singleton is deleted while the controller is running, the next
+`patch_status` 404s; the controller recreates the instance (step 2) and retries
+the patch once, so that event's figures are not lost. The controller never
+overwrites an existing instance — its `spec` is empty and controller-owned
+regardless.
+
+This autocreation is required because `patch_status` 404s against a missing
+instance; without it the supply figures are never written and the webhook fails
+closed on every admission (Constitution Principle I).
 
 ---
 

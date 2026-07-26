@@ -7,15 +7,16 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Patch, PatchParams};
+use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::reflector::Store;
 use kube::runtime::{reflector, watcher};
 use kube::{Api, Client, ResourceExt};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::crd::{
-    Allocation, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME, ClusterCapacity,
+    Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
+    ClusterCapacity,
 };
 use crate::resources::quantity::extract_pod_requests;
 use crate::time_util::now_rfc3339;
@@ -87,6 +88,112 @@ fn ratio(allocated: i64, ceiling: i64) -> f64 {
     }
 }
 
+/// The `budgetPercent` seeded into an auto-created `cluster-allocation` instance.
+/// A safe default below 100% so a fresh cluster admits workloads but still guards
+/// against full overcommit (Constitution Principle II).
+const DEFAULT_BUDGET_PERCENT: i32 = 80;
+
+/// The decision [`ensure_singleton`] reaches from a singleton existence check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingletonCheck {
+    /// The instance exists — leave it untouched (never overwrite the budget).
+    Exists,
+    /// The instance is missing (404) — create the default singleton.
+    Missing,
+    /// The check errored unexpectedly — log and retry next cycle.
+    Error,
+}
+
+/// Whether a kube error is a 404 NotFound — i.e. the singleton is absent. The
+/// HTTP code is matched directly so the behaviour is robust to reason-string
+/// variations across Kubernetes versions.
+fn is_not_found(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(status) if status.code == 404)
+}
+
+/// Classify the result of `Api::get` on the singleton: `Ok` → exists, 404 →
+/// create, anything else → retry.
+fn classify_check<T>(result: &Result<T, kube::Error>) -> SingletonCheck {
+    match result {
+        Ok(_) => SingletonCheck::Exists,
+        Err(err) if is_not_found(err) => SingletonCheck::Missing,
+        Err(_) => SingletonCheck::Error,
+    }
+}
+
+/// Whether a `create` attempt left the singleton in place. `AlreadyExists` (409)
+/// is a success — another replica won the race, but the singleton now exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateOutcome {
+    Created,
+    AlreadyExists,
+    Error,
+}
+
+fn classify_create<T>(result: &Result<T, kube::Error>) -> CreateOutcome {
+    match result {
+        Ok(_) => CreateOutcome::Created,
+        Err(kube::Error::Api(status)) if status.code == 409 => CreateOutcome::AlreadyExists,
+        Err(_) => CreateOutcome::Error,
+    }
+}
+
+/// The default `cluster-allocation` instance created when the singleton is
+/// absent: the only user-configurable field, `budgetPercent`, is seeded with
+/// [`DEFAULT_BUDGET_PERCENT`]. An operator can patch it afterwards.
+fn default_allocation_singleton() -> Allocation {
+    Allocation::new(
+        CLUSTER_ALLOCATION_NAME,
+        AllocationSpec {
+            budget_percent: DEFAULT_BUDGET_PERCENT,
+        },
+    )
+}
+
+/// Idempotent get-or-create of the `cluster-allocation` singleton.
+///
+/// Called once at controller start. A 409 `AlreadyExists` (e.g. another replica
+/// won the race) is treated as success, and an existing instance is never
+/// overwritten — so an operator-set `budgetPercent` is always preserved. Without
+/// this, `recompute` finds no budget and skips writing status, leaving the
+/// webhook with no capacity data so it fails closed on every admission
+/// (Constitution Principle I).
+pub async fn ensure_singleton(api: &Api<Allocation>) {
+    let lookup = api.get(CLUSTER_ALLOCATION_NAME).await;
+    match classify_check(&lookup) {
+        SingletonCheck::Exists => debug!(
+            name = CLUSTER_ALLOCATION_NAME,
+            "Allocation singleton already exists, preserving operator budget"
+        ),
+        SingletonCheck::Missing => {
+            let created = api
+                .create(&PostParams::default(), &default_allocation_singleton())
+                .await;
+            match classify_create(&created) {
+                CreateOutcome::Created => info!(
+                    name = CLUSTER_ALLOCATION_NAME,
+                    budget_percent = DEFAULT_BUDGET_PERCENT,
+                    "created Allocation singleton with default budget"
+                ),
+                CreateOutcome::AlreadyExists => debug!(
+                    name = CLUSTER_ALLOCATION_NAME,
+                    "Allocation singleton already exists (race with another replica)"
+                ),
+                CreateOutcome::Error => {
+                    if let Err(err) = &created {
+                        warn!(%err, "failed to create Allocation singleton; retrying next cycle");
+                    }
+                }
+            }
+        }
+        SingletonCheck::Error => {
+            if let Err(err) = &lookup {
+                warn!(%err, "failed to check Allocation singleton; retrying next cycle");
+            }
+        }
+    }
+}
+
 /// Recompute allocation from the caches and merge-patch the `Allocation` status.
 async fn recompute(
     pod_store: &Store<Pod>,
@@ -97,8 +204,16 @@ async fn recompute(
     // GET is cheap relative to the recompute interval and avoids a third cache.
     let budget = match allocation_api.get(CLUSTER_ALLOCATION_NAME).await {
         Ok(allocation) => allocation.spec.budget_percent,
+        Err(err) if is_not_found(&err) => {
+            // The singleton vanished since startup (e.g. an operator deleted it):
+            // recreate it and let the next tick read the fresh budget rather than
+            // writing status against a stale/unknown value.
+            warn!(%err, "Allocation singleton missing during recompute; recreating");
+            ensure_singleton(allocation_api).await;
+            return;
+        }
         Err(err) => {
-            debug!(%err, "Allocation CRD not present; skipping recompute");
+            debug!(%err, "Allocation get failed; skipping recompute");
             return;
         }
     };
@@ -139,6 +254,10 @@ pub async fn run(client: Client) {
     let capacity_api = Api::<ClusterCapacity>::all(client.clone());
     let allocation_api = Api::<Allocation>::all(client);
 
+    // Create the singleton before the first recompute — otherwise the budget GET
+    // 404s and status is never written, leaving the webhook with no capacity data.
+    ensure_singleton(&allocation_api).await;
+
     let (pod_store, pod_writer) = reflector::store::<Pod>();
     let (capacity_store, capacity_writer) = reflector::store::<ClusterCapacity>();
 
@@ -176,9 +295,14 @@ pub async fn run(client: Client) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::mock_api::{
+        already_exists, created_object, mock_client, not_found, ok_object,
+    };
     use k8s_openapi::api::core::v1::{Container, PodSpec, ResourceRequirements};
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use kube::core::Status;
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     fn pod_with(phase: Option<&str>, cpu: &str, memory: &str) -> Pod {
         let mut requests = BTreeMap::new();
@@ -274,5 +398,151 @@ mod tests {
         assert_eq!(status.ceiling_cpu_milli, 0);
         assert_eq!(status.ceiling_memory_bytes, 0);
         assert_eq!(status.utilization_percent_cpu, 0.0);
+    }
+
+    // ---- singleton autocreation (ensure_singleton decision logic) ----
+
+    /// Build a `kube::Error::Api` carrying a status with the given HTTP code and
+    /// reason, mirroring what the apiserver returns for 404/409/etc.
+    fn api_error(code: u16, reason: &str, message: &str) -> kube::Error {
+        kube::Error::Api(Status::failure(message, reason).with_code(code).boxed())
+    }
+
+    #[test]
+    fn existing_allocation_is_not_recreated() {
+        // The operator set budgetPercent=50; the controller must NOT overwrite it.
+        let lookup: Result<Allocation, kube::Error> = Ok(Allocation::new(
+            CLUSTER_ALLOCATION_NAME,
+            AllocationSpec { budget_percent: 50 },
+        ));
+        assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
+    }
+
+    #[test]
+    fn missing_allocation_triggers_create() {
+        let lookup: Result<Allocation, kube::Error> =
+            Err(api_error(404, "NotFound", "allocations not found"));
+        assert_eq!(classify_check(&lookup), SingletonCheck::Missing);
+    }
+
+    #[test]
+    fn unexpected_allocation_get_error_is_retried_not_created() {
+        // A 403 (RBAC) is not a missing instance — never create blindly.
+        let lookup: Result<Allocation, kube::Error> = Err(api_error(403, "Forbidden", "forbidden"));
+        assert_eq!(classify_check(&lookup), SingletonCheck::Error);
+    }
+
+    #[test]
+    fn allocation_create_conflict_is_success() {
+        // 409 = another replica won the race; the singleton now exists.
+        let created: Result<Allocation, kube::Error> =
+            Err(api_error(409, "AlreadyExists", "already exists"));
+        assert_eq!(classify_create(&created), CreateOutcome::AlreadyExists);
+    }
+
+    #[test]
+    fn allocation_create_unexpected_error_is_failure() {
+        let created: Result<Allocation, kube::Error> =
+            Err(api_error(403, "Forbidden", "forbidden"));
+        assert_eq!(classify_create(&created), CreateOutcome::Error);
+    }
+
+    #[test]
+    fn default_allocation_uses_default_budget_and_name() {
+        let alloc = default_allocation_singleton();
+        assert_eq!(
+            alloc.metadata.name.as_deref(),
+            Some(CLUSTER_ALLOCATION_NAME)
+        );
+        assert_eq!(
+            alloc.spec.budget_percent, DEFAULT_BUDGET_PERCENT,
+            "auto-created singleton seeds a safe default budget"
+        );
+    }
+
+    // ---- ensure_singleton against a mocked apiserver (Principle VI) ----
+    //
+    // These drive a real `kube::Api` through `mock_api`, scripting the apiserver
+    // responses to prove the get-or-create wiring end-to-end — not just the
+    // decision logic covered by the pure tests above.
+
+    #[tokio::test]
+    async fn ensure_singleton_creates_allocation_when_absent() {
+        let (client, mut handle) = mock_client();
+        let api = Api::<Allocation>::all(client);
+        let task = tokio::spawn(async move {
+            ensure_singleton(&api).await;
+        });
+
+        // 1. Existence GET → 404 NotFound (singleton absent).
+        let (req, respond) = handle.next_request().await.expect("existence GET");
+        assert_eq!(req.method().as_str(), "GET");
+        assert!(
+            req.uri().path().ends_with("/cluster-allocation"),
+            "GET targets the singleton: {}",
+            req.uri()
+        );
+        respond.send_response(not_found());
+
+        // 2. Create POST → 201 Created.
+        let (req, respond) = handle.next_request().await.expect("create POST");
+        assert_eq!(req.method().as_str(), "POST");
+        respond.send_response(created_object(&default_allocation_singleton()));
+
+        task.await.expect("ensure_singleton did not panic");
+    }
+
+    #[tokio::test]
+    async fn ensure_singleton_preserves_operator_budget_when_present() {
+        let (client, mut handle) = mock_client();
+        let api = Api::<Allocation>::all(client);
+        let task = tokio::spawn(async move {
+            ensure_singleton(&api).await;
+        });
+
+        // The operator set budgetPercent=50. Existence GET → 200 OK with that
+        // instance. ensure_singleton must NOT overwrite it (no create).
+        let existing = Allocation::new(
+            CLUSTER_ALLOCATION_NAME,
+            AllocationSpec { budget_percent: 50 },
+        );
+        let (req, respond) = handle.next_request().await.expect("existence GET");
+        assert_eq!(req.method().as_str(), "GET");
+        respond.send_response(ok_object(&existing));
+
+        task.await.expect("ensure_singleton did not panic");
+
+        // No create may follow: the operator's budget must be left intact. A
+        // short timeout proves no second request is issued (it would resolve
+        // immediately if a create were attempted).
+        match tokio::time::timeout(Duration::from_millis(100), handle.next_request()).await {
+            Err(_elapsed) => {}
+            Ok(Some(req)) => panic!(
+                "ensure_singleton issued an unexpected create {}",
+                req.0.method()
+            ),
+            Ok(None) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_singleton_tolerates_create_conflict() {
+        let (client, mut handle) = mock_client();
+        let api = Api::<Allocation>::all(client);
+        let task = tokio::spawn(async move {
+            ensure_singleton(&api).await;
+        });
+
+        // Existence GET → 404.
+        let (_req, respond) = handle.next_request().await.expect("existence GET");
+        respond.send_response(not_found());
+
+        // Create POST → 409 AlreadyExists (another replica won the race).
+        let (req, respond) = handle.next_request().await.expect("create POST");
+        assert_eq!(req.method().as_str(), "POST");
+        respond.send_response(already_exists());
+
+        // 409 is success: ensure_singleton completes without error.
+        task.await.expect("ensure_singleton did not panic on 409");
     }
 }
