@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use capacity_admission_webhook::crd::{
-    Allocation, AllocationSpec, AllocationStatus, ClusterCapacity, CLUSTER_ALLOCATION_NAME,
+    Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, ClusterCapacity,
 };
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::parse_rfc3339;
@@ -51,9 +51,21 @@ fn populated_store() -> Store<Allocation> {
     store
 }
 
-/// An empty capacity store (the budget tests do not assert on capacity gauges).
-fn empty_capacity_store() -> Store<ClusterCapacity> {
-    kube::runtime::reflector::store::<ClusterCapacity>().0
+/// A capacity store with the 100 CPU / 200 GiB the budget fixtures imply
+/// (ceiling 80 CPU = 80% of 100). The webhook now requires the supply cache to
+/// be present (Principle I), so the budget tests supply it.
+fn capacity_store() -> Store<ClusterCapacity> {
+    use capacity_admission_webhook::crd::{ClusterCapacitySpec, ClusterCapacityStatus};
+    let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
+    let mut c = ClusterCapacity::new("cluster-capacity", ClusterCapacitySpec {});
+    c.status = Some(ClusterCapacityStatus {
+        total_allocatable_cpu_milli: 100_000,
+        total_allocatable_memory_bytes: 200 * GIB,
+        node_count: 2,
+        last_updated: spec_allocation_status().last_updated.clone(),
+    });
+    writer.apply_watcher_event(&watcher::Event::Apply(c));
+    store
 }
 
 /// Application state with the clock pinned to the fixture's `last_updated`, so
@@ -62,7 +74,7 @@ fn app_state(store: Store<Allocation>) -> AppState {
     let now = parse_rfc3339(&spec_allocation_status().last_updated).unwrap();
     AppState::with_clock(
         Arc::new(store),
-        Arc::new(empty_capacity_store()),
+        Arc::new(capacity_store()),
         Arc::new(move || now),
         Arc::new(Metrics::new()),
     )

@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use capacity_admission_webhook::crd::{
-    Allocation, AllocationSpec, AllocationStatus, ClusterCapacity, ClusterCapacitySpec,
-    ClusterCapacityStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
+    Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
+    ClusterCapacity, ClusterCapacitySpec, ClusterCapacityStatus,
 };
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::parse_rfc3339;
@@ -23,8 +23,8 @@ use kube::core::admission::Operation;
 use kube::runtime::reflector::Store;
 use kube::runtime::watcher;
 use tracing::field::{Field, Visit};
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 const GIB: i64 = 1024 * 1024 * 1024;
 const FIXTURE_TIME: &str = "2026-07-26T00:00:00Z";
@@ -148,11 +148,10 @@ where
     ) {
         let mut fields = FieldCollector(HashMap::new());
         event.record(&mut fields);
-        fields.0.insert(
-            "level".to_string(),
-            event.metadata().level().to_string(),
-        );
-        self.0 .0.lock().unwrap().push(fields.0);
+        fields
+            .0
+            .insert("level".to_string(), event.metadata().level().to_string());
+        self.0.0.lock().unwrap().push(fields.0);
     }
 }
 
@@ -203,7 +202,11 @@ async fn admit_logs_every_contract_field() {
     let (events, _guard) = capture();
     let state = state(Arc::new(Metrics::new()));
     // 5 CPU / 40 GiB → projected 75 / 150, both under ceiling → admit.
-    handle(review_body("admit", Operation::Create, &pod("5", "40Gi")), &state).await;
+    handle(
+        review_body("admit", Operation::Create, &pod("5", "40Gi")),
+        &state,
+    )
+    .await;
 
     let captured = events.0.lock().unwrap();
     let cpu = event_for_resource(&captured, "cpu");
@@ -217,7 +220,10 @@ async fn admit_logs_every_contract_field() {
     assert_eq!(cpu.get("ceiling"), Some(&"80000".to_string()));
     assert_eq!(cpu.get("budget_percent"), Some(&"80".to_string()));
     assert_eq!(cpu.get("freshness_seconds"), Some(&"0".to_string()));
-    assert!(cpu.get("latency_ms").is_some(), "latency_ms must be present");
+    assert!(
+        cpu.get("latency_ms").is_some(),
+        "latency_ms must be present"
+    );
     assert_eq!(cpu.get("level"), Some(&"INFO".to_string()));
 }
 
@@ -226,7 +232,11 @@ async fn deny_logs_reason_and_figures() {
     let (events, _guard) = capture();
     let state = state(Arc::new(Metrics::new()));
     // 15 CPU → projected 85 > 80 → CPU over budget.
-    handle(review_body("deny", Operation::Create, &pod("15", "10Gi")), &state).await;
+    handle(
+        review_body("deny", Operation::Create, &pod("15", "10Gi")),
+        &state,
+    )
+    .await;
 
     let captured = events.0.lock().unwrap();
     let cpu = event_for_resource(&captured, "cpu");
@@ -264,15 +274,32 @@ async fn metrics_endpoint_exposes_verdicts_and_gauges() {
     let metrics = Arc::new(Metrics::new());
     let state = state(Arc::clone(&metrics));
     // One admit (cpu+memory allow), one cpu-over deny.
-    handle(review_body("a", Operation::Create, &pod("5", "40Gi")), &state).await;
-    handle(review_body("d", Operation::Create, &pod("15", "10Gi")), &state).await;
+    handle(
+        review_body("a", Operation::Create, &pod("5", "40Gi")),
+        &state,
+    )
+    .await;
+    handle(
+        review_body("d", Operation::Create, &pod("15", "10Gi")),
+        &state,
+    )
+    .await;
 
     let text = metrics.render();
     // Verdict counters: 1 cpu allow, 1 cpu deny, 2 memory allow (admit + the
     // deny whose memory was within budget).
-    assert!(text.contains(r#"verdicts_total{resource="cpu",verdict="allow"} 1"#), "{text}");
-    assert!(text.contains(r#"verdicts_total{resource="cpu",verdict="deny"} 1"#), "{text}");
-    assert!(text.contains(r#"verdicts_total{resource="memory",verdict="allow"} 2"#), "{text}");
+    assert!(
+        text.contains(r#"verdicts_total{resource="cpu",verdict="allow"} 1"#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"verdicts_total{resource="cpu",verdict="deny"} 1"#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"verdicts_total{resource="memory",verdict="allow"} 2"#),
+        "{text}"
+    );
     // Capacity gauges reflect the last decision's view (SC-003).
     assert!(
         text.contains(r#"current_allocation{resource="cpu"} 70000"#),

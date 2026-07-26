@@ -25,6 +25,10 @@ name = "capacity_awareness"
 path = "tests/integration/capacity_awareness.rs"
 
 [[test]]
+name = "fail_safe"
+path = "tests/integration/fail_safe.rs"
+
+[[test]]
 name = "budget_bdd"
 path = "tests/bdd/budget_steps.rs"
 harness = false
@@ -32,6 +36,11 @@ harness = false
 [[test]]
 name = "capacity_awareness_bdd"
 path = "tests/bdd/steps/capacity_steps.rs"
+harness = false
+
+[[test]]
+name = "fail_safe_bdd"
+path = "tests/bdd/steps/fail_safe_steps.rs"
 harness = false
 
 [dependencies]

@@ -136,10 +136,7 @@ impl Metrics {
         )
         .expect("current_allocation gauge vec");
         let ceiling = IntGaugeVec::new(
-            Opts::new(
-                "capacity_admission_ceiling",
-                "Budget ceiling per resource.",
-            ),
+            Opts::new("capacity_admission_ceiling", "Budget ceiling per resource."),
             &["resource"],
         )
         .expect("ceiling gauge vec");
@@ -171,11 +168,7 @@ impl Metrics {
         // /metrics from startup (a scrape must see the full surface at zero,
         // not an empty response before the first decision).
         for resource in [ResourceLabel::Cpu, ResourceLabel::Memory] {
-            for verdict in [
-                VerdictLabel::Allow,
-                VerdictLabel::Deny,
-                VerdictLabel::Error,
-            ] {
+            for verdict in [VerdictLabel::Allow, VerdictLabel::Deny, VerdictLabel::Error] {
                 verdicts.with_label_values(&[resource.as_str(), verdict.as_str()]);
             }
             total_allocatable
@@ -297,7 +290,9 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains(r#"capacity_admission_verdicts_total{resource="memory",verdict="deny"} 1"#),
+            text.contains(
+                r#"capacity_admission_verdicts_total{resource="memory",verdict="deny"} 1"#
+            ),
             "{text}"
         );
     }

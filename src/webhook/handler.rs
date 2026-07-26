@@ -31,9 +31,7 @@ use kube::runtime::reflector::Store;
 use crate::crd::{
     Allocation, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME, ClusterCapacity,
 };
-use crate::metrics::{
-    CapacityFigures, Metrics, ResourceLabel as MetricResource, VerdictLabel,
-};
+use crate::metrics::{CapacityFigures, Metrics, ResourceLabel as MetricResource, VerdictLabel};
 use crate::resources::quantity::{self, QuantityParseError};
 use crate::time_util;
 use crate::webhook::admission::{AdmissionVerdict, Figures, check_budget};
@@ -162,17 +160,21 @@ pub async fn handle(body: Bytes, state: &AppState) -> AdmissionResponse {
 /// when the AdmissionReview cannot be parsed; otherwise a [`DecisionOutcome`]
 /// (admit, deny, or a fail-closed reject) carrying the response and the summary
 /// used for logging/metrics.
-fn run_decision(body: &[u8], state: &AppState, now: i64) -> Result<DecisionOutcome, AdmissionError> {
-    let review: AdmissionReview<Pod> = serde_json::from_slice(body).map_err(|err| {
-        AdmissionError::DeserialisationFailure {
+fn run_decision(
+    body: &[u8],
+    state: &AppState,
+    now: i64,
+) -> Result<DecisionOutcome, AdmissionError> {
+    let review: AdmissionReview<Pod> =
+        serde_json::from_slice(body).map_err(|err| AdmissionError::DeserialisationFailure {
             detail: err.to_string(),
-        }
-    })?;
-    let request: AdmissionRequest<Pod> = review.try_into().map_err(|_| {
-        AdmissionError::DeserialisationFailure {
-            detail: "request field missing".to_string(),
-        }
-    })?;
+        })?;
+    let request: AdmissionRequest<Pod> =
+        review
+            .try_into()
+            .map_err(|_| AdmissionError::DeserialisationFailure {
+                detail: "request field missing".to_string(),
+            })?;
     Ok(evaluate(
         &request,
         &state.allocation_store,
@@ -192,8 +194,8 @@ pub fn evaluate(
     now: i64,
     freshness_threshold_secs: u64,
 ) -> DecisionOutcome {
-    let Some(allocation) = allocation_store
-        .find(|allocation| allocation.name_any() == CLUSTER_ALLOCATION_NAME)
+    let Some(allocation) =
+        allocation_store.find(|allocation| allocation.name_any() == CLUSTER_ALLOCATION_NAME)
     else {
         return reject_outcome(
             AdmissionError::CapacityDataMissing {
@@ -216,30 +218,46 @@ pub fn evaluate(
 
     let freshness = assess_freshness(&status.last_updated, now, freshness_threshold_secs);
 
-    let (total_cpu, total_mem) = capacity_store
+    // T032: enforce the freshness threshold. Data older than the threshold (or
+    // with an unparseable timestamp) cannot be authoritatively verified → deny
+    // (Principle I).
+    if freshness.stale {
+        return reject_outcome(
+            AdmissionError::CapacityDataStale {
+                age_secs: freshness.age_secs,
+                threshold_secs: freshness_threshold_secs,
+            },
+            &request_meta_of(request),
+            DecisionVerdict::Error,
+        );
+    }
+
+    // The supply-side cache must also be present; a missing ClusterCapacity
+    // means the supply state is not initialised → deny (Error Path Matrix).
+    let Some(capacity_status) = capacity_store
         .find(|c| c.name_any() == CLUSTER_CAPACITY_NAME)
         .and_then(|c| c.status.clone())
-        .map(|s| {
-            (
-                s.total_allocatable_cpu_milli,
-                s.total_allocatable_memory_bytes,
-            )
-        })
-        .unwrap_or((0, 0));
+    else {
+        return reject_outcome(
+            AdmissionError::CapacityDataMissing {
+                which: MissingCapacityData::ClusterCapacity,
+            },
+            &request_meta_of(request),
+            DecisionVerdict::Error,
+        );
+    };
+    let total_cpu = capacity_status.total_allocatable_cpu_milli;
+    let total_mem = capacity_status.total_allocatable_memory_bytes;
 
     // Resolve the effective request (figures). A quantity parse failure is
     // fail-closed (T034).
     let effective = match effective_request(request) {
         Ok(effective) => effective,
         Err(error) => {
-            return reject_outcome(
-                error,
-                &request_meta_of(request),
-                DecisionVerdict::Error,
-            )
-            .with_freshness(freshness.seconds)
-            .with_budget(budget_percent)
-            .with_totals(total_cpu, total_mem)
+            return reject_outcome(error, &request_meta_of(request), DecisionVerdict::Error)
+                .with_freshness(freshness.seconds)
+                .with_budget(budget_percent)
+                .with_totals(total_cpu, total_mem);
         }
     };
 
@@ -670,7 +688,12 @@ pub fn refresh_gauges(
     let (total_cpu, total_mem) = capacity_store
         .find(|c| c.name_any() == CLUSTER_CAPACITY_NAME)
         .and_then(|c| c.status.clone())
-        .map(|s| (s.total_allocatable_cpu_milli, s.total_allocatable_memory_bytes))
+        .map(|s| {
+            (
+                s.total_allocatable_cpu_milli,
+                s.total_allocatable_memory_bytes,
+            )
+        })
         .unwrap_or((0, 0));
 
     let freshness = assess_freshness(&status.last_updated, now, 0);
@@ -748,7 +771,11 @@ fn pod_request(pod: Option<&Pod>) -> Result<Figures, AdmissionError> {
 
 /// `namespace/name` for the triggering workload.
 fn workload_of(request: &AdmissionRequest<Pod>) -> String {
-    format!("{}/{}", request.namespace.as_deref().unwrap_or(""), request.name)
+    format!(
+        "{}/{}",
+        request.namespace.as_deref().unwrap_or(""),
+        request.name
+    )
 }
 
 /// Uppercase operation label for logging.
@@ -902,6 +929,22 @@ mod tests {
         kube::runtime::reflector::store::<ClusterCapacity>().0
     }
 
+    /// A capacity store with 100 CPU / 200 GiB present (freshness matches the
+    /// fixture clock), so the admit/deny paths reach the budget check.
+    fn populated_capacity_store() -> Store<ClusterCapacity> {
+        use crate::crd::{ClusterCapacity, ClusterCapacitySpec, ClusterCapacityStatus};
+        let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
+        let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
+        c.status = Some(ClusterCapacityStatus {
+            total_allocatable_cpu_milli: 100_000,
+            total_allocatable_memory_bytes: 200 * 1024 * 1024 * 1024,
+            node_count: 2,
+            last_updated: "2026-07-26T00:00:00Z".to_string(),
+        });
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(c));
+        store
+    }
+
     fn populated_store() -> Store<Allocation> {
         let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
         writer.apply_watcher_event(&watcher::Event::Apply(allocation_with(status())));
@@ -985,7 +1028,7 @@ mod tests {
         let outcome = evaluate(
             &req,
             &populated_store(),
-            &empty_capacity_store(),
+            &populated_capacity_store(),
             now(),
             30,
         );
@@ -1002,7 +1045,7 @@ mod tests {
         let outcome = evaluate(
             &req,
             &populated_store(),
-            &empty_capacity_store(),
+            &populated_capacity_store(),
             now(),
             30,
         );
@@ -1014,6 +1057,31 @@ mod tests {
         assert_eq!(outcome.summary.cpu.ceiling, 80_000);
         assert!(outcome.summary.cpu.over);
         assert!(!outcome.summary.memory.over);
+    }
+
+    #[test]
+    fn evaluate_rejects_stale_data() {
+        let req = request(&pod("5", "1Ki"), Operation::Create, None);
+        // 60s older than the fixture clock → exceeds the 30s threshold.
+        let outcome = evaluate(
+            &req,
+            &populated_store(),
+            &populated_capacity_store(),
+            now() + 60,
+            30,
+        );
+        assert!(!outcome.response.allowed);
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+        assert_eq!(outcome.summary.reason, "capacity_data_stale");
+        assert_eq!(outcome.response.result.code, 500);
+    }
+
+    #[test]
+    fn evaluate_rejects_missing_cluster_capacity() {
+        let req = request(&pod("5", "1Ki"), Operation::Create, None);
+        let outcome = evaluate(&req, &populated_store(), &empty_capacity_store(), now(), 30);
+        assert!(!outcome.response.allowed);
+        assert_eq!(outcome.summary.reason, "capacity_data_missing");
     }
 
     // ---- assess_freshness ----
@@ -1062,7 +1130,10 @@ mod tests {
             42u8
         };
         let result = with_timeout(slow, 10).await;
-        assert!(matches!(result, Err(AdmissionError::Timeout { timeout_ms: 10 })));
+        assert!(matches!(
+            result,
+            Err(AdmissionError::Timeout { timeout_ms: 10 })
+        ));
     }
 
     #[test]
@@ -1073,8 +1144,7 @@ mod tests {
 
     #[test]
     fn classify_error_preserves_known_variants() {
-        let boxed: Box<dyn std::error::Error> =
-            Box::new(AdmissionError::Timeout { timeout_ms: 5 });
+        let boxed: Box<dyn std::error::Error> = Box::new(AdmissionError::Timeout { timeout_ms: 5 });
         assert!(matches!(
             classify_error(boxed),
             AdmissionError::Timeout { timeout_ms: 5 }

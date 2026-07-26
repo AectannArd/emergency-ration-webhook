@@ -17,8 +17,8 @@ use capacity_admission_webhook::config::Config;
 use capacity_admission_webhook::controllers;
 use capacity_admission_webhook::crd::{Allocation, ClusterCapacity};
 use capacity_admission_webhook::metrics::Metrics;
-use capacity_admission_webhook::webhook::handler::{AppState, refresh_gauges, router};
 use capacity_admission_webhook::time_util;
+use capacity_admission_webhook::webhook::handler::{AppState, refresh_gauges, router};
 
 use kube::runtime::{reflector, watcher};
 use kube::{Api, Client};
@@ -99,7 +99,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ticker = tokio::time::interval(Duration::from_secs(2));
             loop {
                 ticker.tick().await;
-                refresh_gauges(&metrics, &allocation_store, &capacity_store, time_util::now_unix());
+                refresh_gauges(
+                    &metrics,
+                    &allocation_store,
+                    &capacity_store,
+                    time_util::now_unix(),
+                );
             }
         });
     }

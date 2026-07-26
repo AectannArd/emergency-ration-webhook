@@ -11,16 +11,16 @@
 use std::sync::Arc;
 
 use capacity_admission_webhook::crd::{
-    Allocation, AllocationSpec, AllocationStatus, ClusterCapacity, ClusterCapacitySpec,
-    ClusterCapacityStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
+    Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
+    ClusterCapacity, ClusterCapacitySpec, ClusterCapacityStatus,
 };
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::parse_rfc3339;
 use capacity_admission_webhook::webhook::handler::{AppState, Clock, handle};
 use cucumber::{World as _, given, then, when};
 use kube::core::admission::AdmissionResponse;
-use kube::runtime::reflector::store::Writer;
 use kube::runtime::reflector::Store;
+use kube::runtime::reflector::store::Writer;
 use kube::runtime::watcher;
 
 const GIB: i64 = 1024 * 1024 * 1024;
@@ -85,8 +85,7 @@ impl CapacityWorld {
     /// caches, then run a pod through the admission handler.
     async fn submit(&mut self, request_cpu_milli: i64, request_mem_bytes: i64) {
         let capacity = {
-            let mut c =
-                ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
+            let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
             c.status = Some(ClusterCapacityStatus {
                 total_allocatable_cpu_milli: self.total_cpu_milli,
                 total_allocatable_memory_bytes: self.total_mem_bytes,
@@ -279,9 +278,7 @@ async fn metrics_ceiling(world: &mut CapacityWorld, ceiling: i64) {
 async fn metrics_ratio(world: &mut CapacityWorld, ratio: f64) {
     let text = world.metrics_text();
     assert!(
-        text.contains(&format!(
-            r#"allocation_ratio{{resource="cpu"}} {ratio}"#
-        )),
+        text.contains(&format!(r#"allocation_ratio{{resource="cpu"}} {ratio}"#)),
         "{text}"
     );
 }
