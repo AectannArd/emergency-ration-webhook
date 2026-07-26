@@ -138,6 +138,18 @@ jobs:
           EOF
       - name: Smoke test — a small pod is admitted, an over-budget pod is denied
         run: |
+          # Wait for the controllers to populate the Allocation status before
+          # testing admission. Without this, the webhook has no capacity data
+          # and rejects everything (fail-closed), including the valid pod.
+          echo "Waiting for Allocation status to be populated..."
+          for i in $(seq 1 30); do
+            if kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null | grep -q '[0-9]'; then
+              echo "Allocation status populated (ceiling=$($(kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}'))m CPU)"
+              break
+            fi
+            sleep 2
+          done
+
           # A small pod in an allowed namespace must be admitted.
           kubectl -n default run smoke-ok --image=nginx --requests='cpu=10m,memory=10Mi' --restart=Never
           # An over-budget request must be denied by the webhook (fail-closed).
