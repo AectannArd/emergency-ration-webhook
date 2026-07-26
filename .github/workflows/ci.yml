@@ -91,19 +91,21 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -keyout tls.key -out tls.crt \
             -days 1 -config csr.conf -extensions v3_req
 
-          kubectl apply -f deploy/deployment.yaml
-          kubectl -n capacity-admission create secret tls capacity-admission-webhook-tls \
-            --cert=tls.crt --key=tls.key
           kubectl apply -f deploy/rbac.yaml
           kubectl apply -f deploy/crds.yaml
+
+          # Patch the image to the kind-loaded tag BEFORE applying the
+          # Deployment, so pods are created with the correct image from the
+          # start (avoids ImagePullBackOff on :latest).
+          sed 's|image: capacity-admission-webhook:latest|image: capacity-admission-webhook:e2e|' \
+            deploy/deployment.yaml | kubectl apply -f -
+
+          kubectl -n capacity-admission create secret tls capacity-admission-webhook-tls \
+            --cert=tls.crt --key=tls.key
 
           CABUNDLE="$(base64 -w0 tls.crt)"
           sed "s|# caBundle: .*|caBundle: ${CABUNDLE}|" deploy/webhook-config.yaml \
             | kubectl apply -f -
-
-          # Patch the Deployment to the image loaded into kind.
-          kubectl -n capacity-admission set image deployment/capacity-admission-webhook \
-            webhook=capacity-admission-webhook:e2e
       - name: Wait for webhook readiness
         run: |
           if ! kubectl -n capacity-admission wait --for=condition=Ready pod \
