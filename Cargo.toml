@@ -21,8 +21,30 @@ name = "budget_enforcement"
 path = "tests/integration/budget_enforcement.rs"
 
 [[test]]
+name = "capacity_awareness"
+path = "tests/integration/capacity_awareness.rs"
+
+[[test]]
+name = "fail_safe"
+path = "tests/integration/fail_safe.rs"
+
+[[test]]
+name = "performance"
+path = "tests/integration/performance.rs"
+
+[[test]]
 name = "budget_bdd"
 path = "tests/bdd/budget_steps.rs"
+harness = false
+
+[[test]]
+name = "capacity_awareness_bdd"
+path = "tests/bdd/steps/capacity_steps.rs"
+harness = false
+
+[[test]]
+name = "fail_safe_bdd"
+path = "tests/bdd/steps/fail_safe_steps.rs"
 harness = false
 
 [dependencies]

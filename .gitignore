@@ -8,6 +8,7 @@ venv/
 # Build output
 dist/
 build/
+target/
 *.log
 
 # Environment / secrets

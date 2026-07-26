@@ -1,5 +1,56 @@
-# TLS certificate provisioning for the webhook HTTPS endpoint.
+# TLS certificate provisioning for the webhook HTTPS endpoint (T040, R9).
 #
-# Placeholder — the full manifest (cert-manager Certificate, default path, with
-# a documented fallback to a manually-provided TLS Secret) lands in Phase 6,
-# task T040.
+# Default path: cert-manager issues a serving certificate for the webhook Service
+# and stores it in the Secret mounted by the Deployment. cert-manager's
+# ca-injector then injects the CA bundle into the ValidatingWebhookConfiguration
+# (see the `cert-manager.io/inject-ca-from` annotation on webhook-config.yaml).
+#
+# Fallback (clusters without cert-manager): create the TLS Secret manually and
+# comment out the cert-manager resources below. Example with openssl:
+#
+#   # Generate a key + self-signed cert (CN/SAN = the in-cluster Service DNS):
+#   cat > csr.conf <<EOF
+#   [req]
+#   req_extensions = v3_req
+#   distinguished_name = req_distinguished_name
+#   [v3_req]
+#   subjectAltName = @alt_names
+#   [alt_names]
+#   DNS.1 = capacity-admission-webhook
+#   DNS.2 = capacity-admission-webhook.capacity-admission
+#   DNS.3 = capacity-admission-webhook.capacity-admission.svc
+#   EOF
+#   openssl req -x509 -newkey rsa:2048 -nodes -keyout tls.key -out tls.crt \
+#     -days 365 -subj "/CN=capacity-admission-webhook" -config csr.conf -extensions v3_req
+#   # Create the Secret and base64-encode the cert for caBundle in webhook-config.yaml:
+#   kubectl create secret tls capacity-admission-webhook-tls \
+#     --cert=tls.crt --key=tls.key -n capacity-admission
+#   kubectl get secret capacity-admission-webhook-tls -o jsonpath='{.data.tls\.crt}' -n capacity-admission
+
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: capacity-admission-self-signed
+  namespace: capacity-admission
+spec:
+  selfSigned: {}
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: capacity-admission-webhook
+  namespace: capacity-admission
+spec:
+  # Secret consumed by the Deployment (volumeMount /tls).
+  secretName: capacity-admission-webhook-tls
+  dnsNames:
+    - capacity-admission-webhook
+    - capacity-admission-webhook.capacity-admission
+    - capacity-admission-webhook.capacity-admission.svc
+  # The CA is injected into the ValidatingWebhookConfiguration caBundle.
+  isCA: true
+  issuerRef:
+    name: capacity-admission-self-signed
+    kind: Issuer
