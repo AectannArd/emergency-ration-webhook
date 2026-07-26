@@ -105,6 +105,20 @@ impl AdmissionError {
         }
     }
 
+    /// Snake-case reason slug for structured logging (e.g. `capacity_data_stale`).
+    pub fn slug(&self) -> &'static str {
+        match self {
+            AdmissionError::OverBudget { .. } => "over_budget",
+            AdmissionError::CapacityDataStale { .. } => "capacity_data_stale",
+            AdmissionError::CapacityDataMissing { .. } => "capacity_data_missing",
+            AdmissionError::DeserialisationFailure { .. } => "deserialisation_failure",
+            AdmissionError::QuantityParseFailure { .. } => "quantity_parse_failure",
+            AdmissionError::Timeout { .. } => "timeout",
+            AdmissionError::InternalError => "internal_error",
+            AdmissionError::Unknown { .. } => "unknown",
+        }
+    }
+
     /// Machine-readable reason slug for the AdmissionResponse.
     pub fn reason(&self) -> &'static str {
         // NOTE: takes `&self` (not `self`) so callers can read several fields

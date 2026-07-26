@@ -8,12 +8,15 @@
 //! Covers spec.md US1 acceptance scenarios 1–5 and SC-002 (denial figures).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use capacity_admission_webhook::crd::{
-    Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME,
+    Allocation, AllocationSpec, AllocationStatus, ClusterCapacity, CLUSTER_ALLOCATION_NAME,
 };
-use capacity_admission_webhook::webhook::handler::handle;
+use capacity_admission_webhook::metrics::Metrics;
+use capacity_admission_webhook::time_util::parse_rfc3339;
+use capacity_admission_webhook::webhook::handler::{AppState, handle};
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::core::admission::Operation;
@@ -46,6 +49,23 @@ fn populated_store() -> Store<Allocation> {
     allocation.status = Some(spec_allocation_status());
     writer.apply_watcher_event(&watcher::Event::Apply(allocation));
     store
+}
+
+/// An empty capacity store (the budget tests do not assert on capacity gauges).
+fn empty_capacity_store() -> Store<ClusterCapacity> {
+    kube::runtime::reflector::store::<ClusterCapacity>().0
+}
+
+/// Application state with the clock pinned to the fixture's `last_updated`, so
+/// the (Phase 5) freshness check sees age 0 and the budget decision governs.
+fn app_state(store: Store<Allocation>) -> AppState {
+    let now = parse_rfc3339(&spec_allocation_status().last_updated).unwrap();
+    AppState::with_clock(
+        Arc::new(store),
+        Arc::new(empty_capacity_store()),
+        Arc::new(move || now),
+        Arc::new(Metrics::new()),
+    )
 }
 
 /// Build a pod with one container requesting `cpu` / `memory`.
@@ -115,7 +135,7 @@ fn review_body(name: &str, op: Operation, object: &Pod, old: Option<&Pod>) -> By
 
 /// Run a review body through the handler against the populated store.
 async fn admit(body: Bytes) -> kube::core::admission::AdmissionResponse {
-    handle(body, &populated_store()).await
+    handle(body, &app_state(populated_store())).await
 }
 
 #[tokio::test]
@@ -170,7 +190,7 @@ async fn scenario3_pod_exactly_at_ceiling_is_admitted() {
 
     let body = review_body("s3", Operation::Create, &pod("5", "1Ki"), None);
     // Projected 85 > 80 → rejected: the budget is a hard ceiling, not a soft target.
-    let resp = handle(body, &store).await;
+    let resp = handle(body, &app_state(store)).await;
     assert!(!resp.allowed, "going one over the hard ceiling must reject");
 }
 
