@@ -69,3 +69,45 @@ Data flow:
                                        ▼
                                  AdmissionReview response
 ```
+
+## Session 2026-07-27 (spec-004: dry-run mode)
+
+> Produced by `/speckit-clarify` ahead of `/speckit-specify` for the dry-run
+> (audit/shadow) enforcement mode feature.
+
+- Q: How should dry-run mode be toggled?
+  → A: **Allocation CRD spec field** (`spec.enforcementMode: enforce | dry-run`).
+     Runtime-adjustable via `kubectl patch` — no restart required to switch
+     modes. Consistent with how `spec.budgetPercent` already works: the webhook
+     reads the Allocation spec from its in-process cache, so a spec change takes
+     effect on the next admission decision. No CLI flag or env var for this.
+
+- Q: What should the AdmissionResponse look like when dry-run mode admits a pod
+  that WOULD have been rejected?
+  → A: **`allowed: true` with the would-be rejection reason surfaced via the
+     admission `warnings` field** (available since Kubernetes 1.19). The pod is
+     cleanly admitted (no modification to `allowed` or `message`), but the
+     operator sees the would-be rejection surfaced as a Warning — visible in
+     `kubectl` output (`Warning: ...`) and in cluster events. Structured logs
+     and metrics also reflect the dry-run decision so dashboards/alerts can
+     track what *would* be blocked. This avoids polluting the rejection
+     `message` (which is the contract for real rejections) while still
+     surfacing the information at the point of action.
+
+### Design consequences (carried into specify)
+
+- The webhook evaluates every admission request normally (budget check,
+  capacity freshness, fail-closed paths) — it just flips the final verdict from
+  deny to allow when `enforcementMode == dry-run` and the only reason for
+  denial is an over-budget condition.
+- **Fail-closed paths stay fail-closed even in dry-run mode.** If capacity data
+  is missing/stale, the webhook cannot evaluate the request at all — it rejects
+  regardless of `enforcementMode`. Dry-run only converts *over-budget* denials
+  to admits; it does not convert *error* rejections to admits. This preserves
+  Constitution Principle I: the webhook never admits under degraded knowledge,
+  even in audit mode.
+- The `enforcementMode` field defaults to `enforce`. The auto-created singleton
+  (`cluster-allocation`) includes this default.
+- Metrics and structured logging must distinguish a dry-run would-deny from a
+  real deny and a real allow, so operators can build dashboards that answer
+  "what would dry-run block?" without conflating it with enforced denials.
