@@ -233,10 +233,13 @@ async fn recompute(
         .unwrap_or((0, 0));
 
     let status = build_allocation_status(allocated, supply, budget);
-    let patch = Patch::Merge(status);
-    let params = PatchParams::apply("allocation-controller");
+    let params = PatchParams::default();
     if let Err(err) = allocation_api
-        .patch_status(CLUSTER_ALLOCATION_NAME, &params, &patch)
+        .patch_status(
+            CLUSTER_ALLOCATION_NAME,
+            &params,
+            &Patch::Merge(super::status_merge_patch(&status)),
+        )
         .await
     {
         warn!(%err, "failed to patch Allocation status");

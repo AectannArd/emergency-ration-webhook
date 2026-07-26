@@ -145,7 +145,7 @@ pub async fn ensure_singleton(api: &Api<ClusterCapacity>) {
 /// (via [`ensure_singleton`]) and retry once so this event's figures are not
 /// lost. Any other failure is logged and retried on the next node event.
 pub async fn patch_status(api: &Api<ClusterCapacity>, cpu: i64, memory: i64, node_count: i32) {
-    let params = PatchParams::apply("node-capacity-controller");
+    let params = PatchParams::default();
     match patch_once(api, &params, cpu, memory, node_count).await {
         Ok(_) => debug!(
             node_count,
@@ -187,8 +187,12 @@ async fn patch_once(
         node_count,
         last_updated: now_rfc3339(),
     };
-    api.patch_status(CLUSTER_CAPACITY_NAME, params, &Patch::Merge(status))
-        .await
+    api.patch_status(
+        CLUSTER_CAPACITY_NAME,
+        params,
+        &Patch::Merge(super::status_merge_patch(&status)),
+    )
+    .await
 }
 
 /// Bootstrap reconcile: read nodes directly and patch the aggregate immediately,
@@ -538,14 +542,35 @@ mod tests {
         });
         respond.send_response(ok_object(&node_list));
 
-        // 2. Status PATCH on the singleton → 200 (16 cores / 32 GiB / 1 node).
+        // 2. Status PATCH on the singleton → 200. The body must carry the
+        // aggregate under a top-level "status" key: a bare status object is a
+        // silent no-op on the /status subresource (patch returns 200, nothing
+        // persists). Assert both the envelope and the summed figures.
         let (req, respond) = handle.next_request().await.expect("status PATCH");
         assert_eq!(req.method().as_str(), "PATCH");
+        let path = req.uri().path().to_string();
         assert!(
-            req.uri().path().ends_with("/cluster-capacity/status"),
-            "PATCH targets the ClusterCapacity status subresource: {}",
-            req.uri()
+            path.ends_with("/cluster-capacity/status"),
+            "PATCH targets the ClusterCapacity status subresource: {path}"
         );
+        let body = http_body_util::BodyExt::collect(req.into_body())
+            .await
+            .expect("patch body collects")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("patch body is JSON");
+        assert!(
+            payload.get("status").is_some(),
+            "PATCH body must wrap status under \"status\": {payload}"
+        );
+        assert_eq!(
+            payload["status"]["totalAllocatableCpuMilli"].as_i64(),
+            Some(16_000)
+        );
+        assert_eq!(
+            payload["status"]["totalAllocatableMemoryBytes"].as_i64(),
+            Some(32 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(payload["status"]["nodeCount"].as_i64(), Some(1));
         respond.send_response(ok_object(&default_capacity_singleton()));
 
         task.await.expect("reconcile_now did not panic");
