@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.2.0 → 2.3.0 (MINOR — Principle X added: User-Facing Functionality Documented in README.md)
+Version change: 2.3.0 → 2.4.0 (MINOR — Principle XI added: CI-Green Completion Gate)
+  Prior: 2.2.0 → 2.3.0 (MINOR — Principle X added: User-Facing Functionality Documented in README.md)
   Prior: 2.1.0 → 2.2.0 (MINOR — Development Workflow expanded: branch-and-PR workflow rule)
   Prior: 2.0.0 → 2.1.0 (MINOR — Principle IX added: Editor Configuration as Code)
   Prior: 1.4.0 → 2.0.0 (MAJOR — Principle V redefined: single-webhook → 3-component operator, 2026-07-25)
@@ -26,6 +27,7 @@ Added principles:
   - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE)
   - v2.1.0: IX — Editor Configuration as Code
   - v2.3.0: X — User-Facing Functionality Documented in README.md
+  - v2.4.0: XI — CI-Green Completion Gate
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -44,8 +46,14 @@ Modified in v2.2.0:
 Modified in v2.3.0:
   - Development Workflow: added documentation-as-deliverable rule — user-facing
     changes MUST update README.md in the same change.
+Modified in v2.4.0:
+  - Development Workflow: quality gate and verification gate now require CI
+    green (all jobs) before a task/feature is declared complete or a PR is
+    merged. A failing CI run is an incomplete deliverable, regardless of
+    whether the failure is in the changed code or pre-existing
+    infrastructure.
 Added sections (cumulative):
-  - Core Principles I–X
+  - Core Principles I–XI
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -287,6 +295,38 @@ configure, and operate it from the README alone.
   lockstep with the feature, keeps the source of truth from drifting from the
   software.
 
+### XI. CI-Green Completion Gate
+
+A task, feature, or spec is not complete until the continuous integration
+pipeline passes on the branch that will be merged. Implementation work whose CI
+is failing — for any reason — is an incomplete deliverable, not a finished one.
+
+- "CI passes" means **all** CI jobs on the pull request are green: not just the
+  Rust quality gate (`fmt`, `clippy`, `test`), but also E2E, `.editorconfig`
+  compliance, and any other check the repository runs. A single failing job
+  fails the gate; there is no "unrelated failure" exemption.
+- A pre-existing infrastructure failure (e.g. a CI bug in `main`) does NOT
+  exempt a change from this gate. If CI is red on `main`, the first obligation
+  is to fix the infrastructure — then the change can be validated and merged.
+  Shipping a change on top of broken CI is shipping unverified work.
+- A task list is not fully checked off while any task's covering CI is red.
+  The implementation agent MUST report CI failures and either fix them or
+  escalate them — not declare success and leave them for the reviewer to find.
+- The pull request is not mergeable until CI is green. Branch-protection
+  required-status-checks SHOULD enforce this automatically; where they are
+  not configured, the reviewer MUST treat a red PR as blocked, not mergeable.
+- This principle is the verification analogue of Principle VIII (test-first):
+  VIII requires a failing test before the code; XI requires a passing pipeline
+  after the code. Code without a passing CI gate is unverified — the same
+  standard the webhook applies to cluster capacity (Principle I).
+- Rationale: a capacity admission webhook is a safety-critical control-plane
+  component. A PR whose CI is red is a PR whose correctness has not been
+  demonstrated in the environment that matters. "It works on my machine" or
+  "the failure is pre-existing" are not sufficient — the pipeline is the
+  evidence, and red evidence is no evidence. Declaring a task complete while
+  CI fails teaches the team to tolerate unverified work, which is the exact
+  anti-pattern the webhook exists to prevent at the cluster level.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -361,6 +401,13 @@ configure, and operate it from the README alone.
   shipping user-facing behaviour without a README delta is incomplete and
   blocked at review, on the same footing as the test-first (Principle VIII) and
   formatting (Principle IX) rules.
+- **CI-green completion gate**: a task or feature is not complete until CI
+  passes on the merge branch — all jobs, not just the Rust quality gate
+  (Principle XI). A pre-existing infrastructure failure on `main` MUST be
+  fixed before any change can be validated and merged; shipping on top of red
+  CI is shipping unverified work. The implementation agent reports CI failures
+  and fixes or escalates them — it does not declare success while the pipeline
+  is red.
 - **Quality gate**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo
   test` (unit + integration) all green before merge. No admission-core change
   lands without a covering test, and no production code lands without a failing
@@ -384,4 +431,4 @@ configure, and operate it from the README alone.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.3.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-26
+**Version**: 2.4.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-26
