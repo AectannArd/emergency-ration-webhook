@@ -29,6 +29,10 @@ name = "fail_safe"
 path = "tests/integration/fail_safe.rs"
 
 [[test]]
+name = "performance"
+path = "tests/integration/performance.rs"
+
+[[test]]
 name = "budget_bdd"
 path = "tests/bdd/budget_steps.rs"
 harness = false

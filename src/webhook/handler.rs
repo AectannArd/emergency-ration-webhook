@@ -93,10 +93,21 @@ impl AppState {
     }
 }
 
-/// Build the axum router for the webhook endpoints.
+/// Build the axum router for the HTTPS admission endpoints (`/validate`,
+/// `/metrics`, `/healthz`).
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/validate", post(validate))
+        .route("/metrics", get(metrics_handler))
+        .route("/healthz", get(healthz))
+        .with_state(state)
+}
+
+/// Build the axum router for the plaintext HTTP scrape/probe endpoints
+/// (`/metrics`, `/healthz`). Mounted on a separate port so Prometheus can scrape
+/// and kubelet can probe without TLS.
+pub fn metrics_router(state: AppState) -> Router {
+    Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz))
         .with_state(state)

@@ -24,6 +24,9 @@ pub struct Config {
     pub capacity_freshness_timeout_secs: u64,
     /// Namespace the webhook and its CRDs live in.
     pub namespace: String,
+    /// HTTP port for `/metrics` and `/healthz` (Prometheus scrape + kubelet
+    /// probes). The admission `/validate` endpoint stays on the HTTPS `port`.
+    pub metrics_port: u16,
 }
 
 impl Default for Config {
@@ -35,6 +38,7 @@ impl Default for Config {
             decision_timeout_ms: 100,
             capacity_freshness_timeout_secs: 30,
             namespace: String::from("capacity-admission"),
+            metrics_port: 9090,
         }
     }
 }
@@ -73,6 +77,8 @@ impl Config {
             .unwrap_or(default.capacity_freshness_timeout_secs),
             namespace: resolve(args, "--namespace", "NAMESPACE", &env_var)
                 .unwrap_or(default.namespace),
+            metrics_port: resolve(args, "--metrics-port", "METRICS_PORT", &env_var)
+                .unwrap_or(default.metrics_port),
         }
     }
 }
@@ -119,6 +125,7 @@ mod tests {
         assert_eq!(cfg.decision_timeout_ms, 100);
         assert_eq!(cfg.capacity_freshness_timeout_secs, 30);
         assert_eq!(cfg.namespace, "capacity-admission");
+        assert_eq!(cfg.metrics_port, 9090);
     }
 
     #[test]

@@ -18,7 +18,9 @@ use capacity_admission_webhook::controllers;
 use capacity_admission_webhook::crd::{Allocation, ClusterCapacity};
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util;
-use capacity_admission_webhook::webhook::handler::{AppState, refresh_gauges, router};
+use capacity_admission_webhook::webhook::handler::{
+    AppState, metrics_router, refresh_gauges, router,
+};
 
 use kube::runtime::{reflector, watcher};
 use kube::{Api, Client};
@@ -109,24 +111,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // HTTPS admission server.
+    // HTTPS admission server + plaintext HTTP metrics/probe server, sharing one
+    // shutdown handle.
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
         &config.tls_cert_file,
         &config.tls_key_file,
     )
     .await?;
-    let app = router(AppState::new(
+    let state = AppState::new(
         allocation_store,
         capacity_store,
         config.decision_timeout_ms,
         config.capacity_freshness_timeout_secs,
         metrics,
-    ));
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    );
 
     let handle = axum_server::Handle::new();
     tokio::spawn(shutdown_signal(handle.clone()));
 
+    // Plaintext HTTP scrape/probe server (/metrics, /healthz) — Prometheus and
+    // kubelet reach these without TLS.
+    let metrics_addr = SocketAddr::from(([0, 0, 0, 0], config.metrics_port));
+    let metrics_app = metrics_router(state.clone());
+    info!(%metrics_addr, "metrics server listening on HTTP");
+    tokio::spawn(
+        axum_server::bind(metrics_addr)
+            .handle(handle.clone())
+            .serve(metrics_app.into_make_service()),
+    );
+
+    // HTTPS admission server (/validate).
+    let app = router(state);
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(%addr, "admission server listening on HTTPS");
     axum_server::bind_rustls(addr, tls)
         .handle(handle)
