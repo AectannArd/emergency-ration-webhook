@@ -145,6 +145,28 @@ spec:
                     (stale/missing capacity data, malformed request, timeout,
                     panic) still reject in both modes. Defaults to 'enforce' when
                     absent.
+                excludedNamespaces:
+                  type: array
+                  nullable: true
+                  description: >
+                    Optional list of namespace names whose pods are exempt from
+                    capacity admission (spec-008). A pod whose namespace matches
+                    ANY entry is admitted without a budget check (OR semantics
+                    with excludedPriorityClasses). Excluded pods are still counted
+                    in allocation accounting.
+                  items:
+                    type: string
+                excludedPriorityClasses:
+                  type: array
+                  nullable: true
+                  description: >
+                    Optional list of priority class names whose pods are exempt
+                    from capacity admission (spec-008). Matched against
+                    pod.spec.priorityClassName as a string match (no PriorityClass
+                    resource resolution). When both lists are set, a pod matching
+                    either is exempt.
+                  items:
+                    type: string
             status:
               type: object
               properties:

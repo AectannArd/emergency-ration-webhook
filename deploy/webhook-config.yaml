@@ -6,7 +6,8 @@
 #   - timeoutSeconds: 5     (apiserver-level; internal --decision-timeout is tighter)
 #   - matchPolicy: Exact
 #   - rules: pods CREATE + UPDATE
-#   - namespaceSelector excludes the webhook's own + system namespaces (bootstrap)
+#   - namespaceSelector: defence-in-depth for the webhook's own namespace only
+#     (spec-008; system-namespace exclusion moved to the Allocation CRD)
 #
 # The caBundle is injected by cert-manager's ca-injector (see cert-setup.yaml
 # annotation) or provided manually as base64.
@@ -43,8 +44,14 @@ webhooks:
         scope: "*"
     namespaceSelector:
       matchExpressions:
-        # Skip namespaces where the webhook itself runs (bootstrap problem) and
-        # system namespaces.
+        # Defence-in-depth only: the apiserver filters the webhook's OWN namespace
+        # so the webhook can never self-gate, even during cold start before its
+        # Allocation cache is populated (FR-009). System-namespace and
+        # priority-class exclusions are now operator-configured on the Allocation
+        # CRD (spec-008 excludedNamespaces / excludedPriorityClasses) and enforced
+        # by the webhook at runtime via check_exemption — they are intentionally
+        # NOT hardcoded here so operators can change them without re-deploying the
+        # ValidatingWebhookConfiguration.
         - key: kubernetes.io/metadata.name
           operator: NotIn
-          values: ["capacity-admission", "kube-system", "kube-public"]
+          values: ["capacity-admission"]
