@@ -47,6 +47,8 @@ fn populated_store() -> Store<Allocation> {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: None,
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     allocation.status = Some(spec_allocation_status());
@@ -88,6 +90,7 @@ fn app_state(store: Store<Allocation>) -> AppState {
         Arc::new(capacity_store()),
         Arc::new(move || now),
         Arc::new(Metrics::new()),
+        "capacity-admission".to_string(),
     )
 }
 
@@ -209,6 +212,8 @@ async fn scenario3_pod_exactly_at_ceiling_is_admitted() {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: None,
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     allocation.status = Some(status);

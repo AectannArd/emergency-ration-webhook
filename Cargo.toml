@@ -39,6 +39,11 @@ path = "tests/integration/fail_safe.rs"
 name = "dry_run"
 path = "tests/integration/dry_run.rs"
 
+# spec-008: workload-exclusion integration tests (namespace + priority class).
+[[test]]
+name = "exclusion"
+path = "tests/integration/exclusion.rs"
+
 # spec-006: node-filter integration tests (mock apiserver).
 [[test]]
 name = "node_filter"

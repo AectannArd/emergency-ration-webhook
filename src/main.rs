@@ -133,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.decision_timeout_ms,
         config.capacity_freshness_timeout_secs,
         metrics,
+        config.namespace.clone(),
     );
 
     let handle = axum_server::Handle::new();

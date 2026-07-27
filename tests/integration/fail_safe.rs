@@ -48,6 +48,8 @@ fn allocation_with(status: AllocationStatus) -> Allocation {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: None,
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     a.status = Some(status);
@@ -93,6 +95,7 @@ fn state(
         Arc::new(capacity),
         Arc::new(move || clock_now),
         Arc::new(Metrics::new()),
+        "capacity-admission".to_string(),
     )
 }
 

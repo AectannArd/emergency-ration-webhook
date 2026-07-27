@@ -50,6 +50,8 @@ fn populated_allocation_store() -> Store<Allocation> {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: None,
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     allocation.status = Some(allocation_status());
@@ -86,6 +88,7 @@ fn state(metrics: Arc<Metrics>) -> AppState {
         Arc::new(populated_capacity_store()),
         Arc::new(move || now),
         metrics,
+        "capacity-admission".to_string(),
     )
 }
 

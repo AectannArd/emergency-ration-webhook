@@ -278,6 +278,8 @@ existing instance is never overwritten (an operator-set budget is preserved).
 |-------|------|------------|-------------|
 | `budgetPercent` | integer | 0–100 | Max allocation as % of total allocatable. Applied to CPU and RAM independently. **80** is the auto-created default; change it with `kubectl patch` (see [Adjusting the Budget at Runtime](#adjusting-the-budget-at-runtime)). |
 | `enforcementMode` | string enum | `enforce` \| `dry-run` | Enforcement mode (spec-004). `enforce` (default) rejects over-budget pods; `dry-run` admits them with a warning instead. Fail-closed paths reject in both modes. Absent → `enforce`. See [Enforcement Modes](#enforcement-modes-enforce--dry-run). |
+| `excludedNamespaces` | array of strings | optional | List of namespace names whose pods are exempt from capacity admission (spec-008). A pod whose namespace matches ANY entry is admitted without a budget check (OR semantics with `excludedPriorityClasses`). Absent or empty → no namespaces exempted. See [Workload Exclusion](#workload-exclusion). |
+| `excludedPriorityClasses` | array of strings | optional | List of priority class names whose pods are exempt from capacity admission (spec-008). Matched against `pod.spec.priorityClassName` as a **string match** (no PriorityClass resource resolution). A pod matching either list is exempt. Absent or empty → no priority classes exempted. See [Workload Exclusion](#workload-exclusion). |
 
 **Status** (controller-computed — read-only for operators):
 
@@ -485,6 +487,68 @@ and counted under the `verdict="dry_run_deny"` metric series (see
 [Prometheus Metrics](#prometheus-metrics)). Validation scenarios for both modes
 are in [`specs/004-dry-run-mode/quickstart.md`](./specs/004-dry-run-mode/quickstart.md).
 
+### Workload Exclusion
+
+The Allocation singleton also carries two **optional exclusion lists** (spec-008):
+`spec.excludedNamespaces` and `spec.excludedPriorityClasses`. A pod matching
+**either** list (OR semantics) is admitted **without a budget check** — an
+explicit, operator-configured bypass of the capacity gate, for workloads that
+must never be gated (system components, the webhook's own namespace, etc.).
+
+- **Check order** (first match wins, subsequent checks skipped): the webhook's
+  own namespace (`capacity-admission`, FR-007) → `excludedNamespaces` →
+  `excludedPriorityClasses`.
+- **Priority class is a string match** on `pod.spec.priorityClassName`. The
+  webhook does **not** resolve `PriorityClass` resources or their preemption
+  values — it only compares the name. An absent or empty-string
+  `priorityClassName` never matches.
+- **Excluded pods are still counted.** The Allocation Controller is unchanged:
+  excluded pods still contribute to `allocatedCpuMilli` /
+  `allocatedMemoryBytes`. Exclusion is an admission-gate bypass, **not** an
+  accounting exclusion — the excluded consumption stays visible in the gauges.
+- **Backward compatible.** Both fields are optional; an absent or empty list
+  exempts nothing, so a pre-spec-008 Allocation behaves exactly as before.
+- **Fail-closed paths still reject.** The exemption check runs only **after**
+  the Allocation singleton and its status are found. Missing allocation, missing
+  status, stale data, timeout, and panic all reject before the exemption check
+  — exclusion never weakens a fail-closed path. An exempt decision is an
+  **explicit allow**, not a fail-open path (see [Failure Modes](#failure-modes)).
+
+Patch the lists at runtime — they take effect on the next decision **without a
+restart** (read from the webhook's in-process cache, like `budgetPercent`):
+
+```sh
+# Exclude a namespace (e.g. monitoring stack, never budget-gated).
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"excludedNamespaces":["monitoring"]}}'
+
+# Exclude a priority class (e.g. critical system pods).
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"excludedPriorityClasses":["system-node-critical"]}}'
+
+# Set both at once (OR semantics — either match exempts).
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"excludedNamespaces":["kube-system"],"excludedPriorityClasses":["system-node-critical"]}}'
+
+# Remove all exclusions (revert to budget-gating everything except the webhook's own ns).
+kubectl patch allocation cluster-allocation --type=json \
+  -p '[{"op":"remove","path":"/spec/excludedNamespaces"},{"op":"remove","path":"/spec/excludedPriorityClasses"}]'
+```
+
+An exempt decision is logged as `decision=exempt` with `exemption_reason` set to
+`namespace`, `priority_class`, or `webhook_namespace`, and counted under
+`capacity_admission_exemptions_total{reason="..."}` — **not** the verdicts
+counter (see [Structured Logging](#structured-logging) and
+[Prometheus Metrics](#prometheus-metrics)).
+
+> **Cold start / self-admission.** Before the webhook's Allocation cache is
+> populated it cannot read the CRD exclusion lists, so the
+> `ValidatingWebhookConfiguration` keeps a `namespaceSelector` that skips the
+> webhook's **own** namespace as apiserver-level defence-in-depth (FR-009). Once
+> the Allocation is cached, the webhook also self-exempts its own namespace at
+> runtime (FR-007). All other namespace/priority-class exclusions are CRD-based
+> and operator-configured.
+
 ### Budget Edge Cases
 
 - **`budgetPercent: 0`** is a **circuit-breaker**: the ceiling is `0` for both
@@ -526,11 +590,13 @@ All metrics are registered on a single registry and prefixed
 `capacity_admission_` (source: [`src/metrics.rs`](./src/metrics.rs)). Every series
 is pre-created at startup, so a scrape sees the full surface at zero before the
 first decision. Label vocabularies: `resource ∈ {cpu, memory}`,
-`verdict ∈ {allow, deny, dry_run_deny, error}`.
+`verdict ∈ {allow, deny, dry_run_deny, error}`,
+`reason ∈ {namespace, priority_class, webhook_namespace}` (spec-008).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `capacity_admission_verdicts_total` | counter | `resource`, `verdict` | Admission decisions by resource and verdict (allow/deny/dry_run_deny/error). `dry_run_deny` is a dry-run mode would-be-rejection (spec-004); query `verdict=~"deny\|dry_run_deny"` for the combined view |
+| `capacity_admission_verdicts_total` | counter | `resource`, `verdict` | Admission decisions by resource and verdict (allow/deny/dry_run_deny/error). `dry_run_deny` is a dry-run mode would-be-rejection (spec-004); query `verdict=~"deny\|dry_run_deny"` for the combined view. Budget decisions only — an exempt decision does **not** increment this counter (see `capacity_admission_exemptions_total`). |
+| `capacity_admission_exemptions_total` | counter | `reason` | Admissions bypassing the budget via the exclusion policy (spec-008). `reason ∈ {namespace, priority_class, webhook_namespace}`. An exempt decision increments this counter and **not** `capacity_admission_verdicts_total`, keeping the verdict counter semantically budget-only. |
 | `capacity_admission_decision_duration_seconds` | histogram | — | Admission decision latency (seconds). Buckets: 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 1.0 |
 | `capacity_admission_capacity_freshness_seconds` | gauge | — | Seconds since the Allocation CRD status was last refreshed |
 | `capacity_admission_allocation_ratio` | gauge | `resource` | Allocated / ceiling ratio per resource (0.0–1.0+) |
@@ -538,7 +604,7 @@ first decision. Label vocabularies: `resource ∈ {cpu, memory}`,
 | `capacity_admission_current_allocation` | gauge | `resource` | Currently allocated capacity per resource |
 | `capacity_admission_ceiling` | gauge | `resource` | Budget ceiling per resource |
 
-A scrape after deploying returns all seven families, each with `# HELP` and
+A scrape after deploying returns all eight families, each with `# HELP` and
 `# TYPE` lines:
 
 ```sh
@@ -560,11 +626,12 @@ identity, the decision, and the capacity figures used. Key fields:
 |-------|---------|
 | `workload` | `<namespace>/<name>` of the triggering workload |
 | `operation` | `CREATE`, `UPDATE`, `DELETE`, or `CONNECT` |
-| `decision` | `allow`, `deny`, `dry_run_deny` (spec-004), or `error` |
+| `decision` | `allow`, `deny`, `dry_run_deny` (spec-004), `exempt` (spec-008), or `error` |
 | `resource_type` | `cpu` or `memory` (one event per resource on allow/deny) |
 | `allocated` / `requested` / `projected` / `ceiling` | Capacity figures for the resource |
 | `budget_percent` | The active `budgetPercent` used for the decision |
 | `enforcement_mode` | The active `enforcementMode` for the decision — `enforce` or `dry_run` (spec-004; present on every decision) |
+| `exemption_reason` | On `exempt`: the criterion that triggered the bypass — `namespace`, `priority_class`, or `webhook_namespace` (spec-008) |
 | `freshness_seconds` | Age of the cached Allocation status |
 | `latency_ms` | Decision latency in milliseconds |
 | `reason` | On `deny`/`dry_run_deny`: `<resource>_over_budget`; on `error`: the failure slug |
@@ -573,6 +640,9 @@ identity, the decision, and the capacity figures used. Key fields:
 - A **deny** logs at WARN (one event per resource, `reason` names the violated resource).
 - A **dry_run_deny** logs at WARN with `decision=dry_run_deny` — a dry-run mode
   would-be-rejection (the pod was admitted with a warning; spec-004).
+- An **exempt** logs at INFO with `decision=exempt` and `exemption_reason` — the
+  pod was admitted by the exclusion policy with no budget check (spec-008). One
+  event (no per-resource figures).
 - An **error** logs at ERROR with the failure `reason`.
 
 Example (admission allowed, CPU line):
@@ -634,6 +704,14 @@ The one mode-sensitive row is the budget over-commit itself — see the last row
 | Pod projected allocation over the budget — `enforce` | Reject | `over_budget` · 403 |
 | Pod projected allocation over the budget — `dry-run` | **Admit** with a warning (`dry_run_deny` · `verdict="dry_run_deny"`) | `over_budget` (WARN) |
 
+> **Exempt decisions are an explicit allow, not a fail-closed path** (spec-008). A
+> pod admitted by the [Workload Exclusion](#workload-exclusion) policy (`decision=exempt`)
+> is not a degradation outcome — it is an operator-configured bypass that runs
+> only *after* the Allocation singleton and its status are found. None of the
+> fail-closed rows above is weakened by exclusion config; the exemption check
+> never fires on a missing allocation, missing status, stale data, timeout, or
+> panic.
+
 Source: [`src/webhook/error.rs`](./src/webhook/error.rs) (variant → message/code
 mapping) and [`src/webhook/handler.rs`](./src/webhook/handler.rs) (the
 panic/timeout/unknown guards). The catch-all guarantees there is no third,
@@ -657,11 +735,19 @@ not drift.
 
 ### Webhook Self-Admission (Bootstrap)
 
-The webhook's own pods run in the excluded namespace `capacity-admission`. The
-`ValidatingWebhookConfiguration` carries a `namespaceSelector` that skips
-`capacity-admission`, `kube-system`, and `kube-public` (key
-`kubernetes.io/metadata.name`, operator `NotIn`), so the webhook never blocks its
-own deployment or control-plane components.
+The webhook's own pods run in the namespace `capacity-admission`. The
+`ValidatingWebhookConfiguration` carries a `namespaceSelector` that skips the
+webhook's **own** namespace only (key `kubernetes.io/metadata.name`, operator
+`NotIn`, value `capacity-admission`) as apiserver-level defence-in-depth, so the
+webhook never blocks its own deployment — even during cold start before its
+Allocation cache is populated (FR-009).
+
+Once the Allocation cache is populated, the webhook also self-exempts its own
+namespace at runtime via `check_exemption` (FR-007). All other namespace and
+priority-class exclusions are **operator-configured on the Allocation CRD**
+(`spec.excludedNamespaces` / `spec.excludedPriorityClasses`, spec-008) and take
+effect without re-deploying the `ValidatingWebhookConfiguration` — see
+[Workload Exclusion](#workload-exclusion).
 
 ## Architecture
 
@@ -836,7 +922,7 @@ src/
 ├── main.rs              # binary entry point: wires the 3 components, binds HTTPS + HTTP servers
 ├── lib.rs               # crate facade (re-exports modules for tests)
 ├── config.rs            # CLI flag / env-var parsing and precedence
-├── metrics.rs           # the 7 Prometheus metrics on one registry
+├── metrics.rs           # the 8 Prometheus metrics on one registry
 ├── time_util.rs         # RFC 3339 parsing / formatting
 ├── crd/
 │   ├── allocation.rs        # Allocation CRD (spec.budgetPercent + status)

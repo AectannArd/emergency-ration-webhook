@@ -149,6 +149,8 @@ fn default_allocation_singleton() -> Allocation {
         AllocationSpec {
             budget_percent: DEFAULT_BUDGET_PERCENT,
             enforcement_mode: Some(EnforcementMode::Enforce),
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     )
 }
@@ -429,6 +431,8 @@ mod tests {
             AllocationSpec {
                 budget_percent: 50,
                 enforcement_mode: None,
+                excluded_namespaces: None,
+                excluded_priority_classes: None,
             },
         ));
         assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
@@ -528,6 +532,8 @@ mod tests {
             AllocationSpec {
                 budget_percent: 50,
                 enforcement_mode: None,
+                excluded_namespaces: None,
+                excluded_priority_classes: None,
             },
         );
         let (req, respond) = handle.next_request().await.expect("existence GET");

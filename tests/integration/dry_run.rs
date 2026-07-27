@@ -81,6 +81,8 @@ fn allocation_in(mode: EnforcementMode) -> Allocation {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: Some(mode),
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     a.status = Some(spec_allocation_status());
@@ -111,6 +113,7 @@ fn state_with(allocation: Store<Allocation>) -> AppState {
         Arc::new(capacity_store()),
         Arc::new(move || now),
         Arc::new(Metrics::new()),
+        "capacity-admission".to_string(),
     )
 }
 

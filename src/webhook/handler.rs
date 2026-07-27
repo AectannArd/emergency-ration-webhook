@@ -30,7 +30,7 @@ use kube::runtime::reflector::Store;
 
 use crate::crd::{
     Allocation, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME, ClusterCapacity,
-    EnforcementMode, resolve_enforcement_mode,
+    EnforcementMode, ExemptionReason, check_exemption, resolve_enforcement_mode,
 };
 use crate::metrics::{CapacityFigures, Metrics, ResourceLabel as MetricResource, VerdictLabel};
 use crate::resources::quantity::{self, QuantityParseError};
@@ -53,6 +53,10 @@ pub struct AppState {
     pub capacity_freshness_timeout_secs: u64,
     pub clock: Clock,
     pub metrics: Arc<Metrics>,
+    /// spec-008: the webhook's own namespace (from `--namespace`/`NAMESPACE`),
+    /// used for the FR-007 bootstrap self-exemption inside `evaluate()`. Retained
+    /// as config (FR-010) — it is NOT deprecated by the CRD-based exclusion.
+    pub webhook_namespace: String,
 }
 
 impl AppState {
@@ -64,6 +68,7 @@ impl AppState {
         decision_timeout_ms: u64,
         capacity_freshness_timeout_secs: u64,
         metrics: Arc<Metrics>,
+        webhook_namespace: String,
     ) -> Self {
         Self {
             allocation_store,
@@ -72,6 +77,7 @@ impl AppState {
             capacity_freshness_timeout_secs,
             clock: Arc::new(time_util::now_unix),
             metrics,
+            webhook_namespace,
         }
     }
 
@@ -82,6 +88,7 @@ impl AppState {
         capacity_store: Arc<Store<ClusterCapacity>>,
         clock: Clock,
         metrics: Arc<Metrics>,
+        webhook_namespace: String,
     ) -> Self {
         Self {
             allocation_store,
@@ -90,6 +97,7 @@ impl AppState {
             capacity_freshness_timeout_secs: 30,
             clock,
             metrics,
+            webhook_namespace,
         }
     }
 }
@@ -193,18 +201,24 @@ fn run_decision(
         &state.capacity_store,
         now,
         state.capacity_freshness_timeout_secs,
+        &state.webhook_namespace,
     ))
 }
 
 /// Read the cached allocation/capacity, compute the capacity figures and
 /// freshness, and decide. Fail-closed when the allocation state is not yet
 /// populated (Principle I). Infallible: every failure becomes a reject outcome.
+///
+/// `webhook_namespace` is the webhook's own namespace (spec-008, FR-007) used by
+/// the exemption check — checked first inside [`check_exemption`] so the webhook
+/// never self-gates once the Allocation is cached.
 pub fn evaluate(
     request: &AdmissionRequest<Pod>,
     allocation_store: &Store<Allocation>,
     capacity_store: &Store<ClusterCapacity>,
     now: i64,
     freshness_threshold_secs: u64,
+    webhook_namespace: &str,
 ) -> DecisionOutcome {
     let Some(allocation) =
         allocation_store.find(|allocation| allocation.name_any() == CLUSTER_ALLOCATION_NAME)
@@ -239,6 +253,23 @@ pub fn evaluate(
             mode_log,
         );
     };
+
+    // spec-008: exemption check (data-model §3.1 step 4). Runs AFTER the
+    // Allocation singleton + its status are found and BEFORE the freshness check
+    // — so the fail-closed paths above (missing allocation, missing status) still
+    // reject even for a pod that would otherwise be exempt. An exempt pod is
+    // admitted without a freshness check, capacity lookup, or budget arithmetic.
+    if let Some(reason) = check_exemption(
+        request.namespace.as_deref(),
+        pod_priority_class(request),
+        &allocation.spec,
+        webhook_namespace,
+    ) {
+        return DecisionOutcome {
+            response: AdmissionResponse::from(request),
+            summary: DecisionSummary::exempt(request, reason, enforcement),
+        };
+    }
 
     let freshness = assess_freshness(&status.last_updated, now, freshness_threshold_secs);
 
@@ -476,6 +507,10 @@ pub enum DecisionVerdict {
     /// admitted the pod with a warning. Fail-closed paths never produce this —
     /// the conversion happens only at the `check_budget` Deny branch.
     DryRunDeny,
+    /// spec-008: admitted by exclusion policy with no budget check. Produced
+    /// only by the exemption branch in `evaluate()`, after the Allocation is
+    /// found. Carries the triggering [`ExemptionReason`] on the summary.
+    Exempt,
     Error,
 }
 
@@ -551,6 +586,10 @@ pub struct DecisionSummary {
     /// spec-004: the active enforcement mode for this decision
     /// (`"enforce"` / `"dry_run"`). Present on every decision (FR-009).
     pub enforcement_mode: String,
+    /// spec-008: the criterion that triggered an exemption (`Some` iff the
+    /// verdict is [`DecisionVerdict::Exempt`]). Drives the exemption counter's
+    /// `reason` label and the log's `exemption_reason` field.
+    pub exemption_reason: Option<ExemptionReason>,
     pub cpu: ResourceFigures,
     pub memory: ResourceFigures,
 }
@@ -573,8 +612,36 @@ impl DecisionSummary {
             freshness_seconds,
             latency_ms: 0,
             enforcement_mode: enforcement_mode.as_log_str().to_string(),
+            exemption_reason: None,
             cpu,
             memory,
+        }
+    }
+
+    /// spec-008: build the summary for an exempt decision. The pod is admitted
+    /// by exclusion policy with no budget check, so there are no resource
+    /// figures, no freshness assessment, and no budget-percent context
+    /// (carried as -1, matching [`reject_outcome`]).
+    fn exempt(
+        request: &AdmissionRequest<Pod>,
+        reason: ExemptionReason,
+        enforcement_mode: EnforcementMode,
+    ) -> Self {
+        Self {
+            workload: workload_of(request),
+            operation: operation_of(&request.operation).to_string(),
+            verdict: DecisionVerdict::Exempt,
+            reason: String::new(),
+            budget_percent: -1,
+            freshness_seconds: -1,
+            latency_ms: 0,
+            enforcement_mode: enforcement_mode.as_log_str().to_string(),
+            exemption_reason: Some(reason),
+            cpu: ResourceFigures::default(),
+            memory: ResourceFigures {
+                resource: ResourceType::Memory,
+                ..ResourceFigures::default()
+            },
         }
     }
 
@@ -631,6 +698,7 @@ fn reject_outcome(
             freshness_seconds: -1,
             latency_ms: 0,
             enforcement_mode: enforcement_mode.to_string(),
+            exemption_reason: None,
             cpu: ResourceFigures::default(),
             memory: ResourceFigures::default(),
         },
@@ -661,6 +729,24 @@ fn emit_log(summary: &DecisionSummary) {
                 freshness_seconds = summary.freshness_seconds,
                 latency_ms = summary.latency_ms,
                 "admission rejected"
+            );
+        }
+        DecisionVerdict::Exempt => {
+            // spec-008: admitted by exclusion policy, no budget check. Single
+            // INFO event carrying the triggering reason (FR-008 / Principle IV).
+            let reason = summary
+                .exemption_reason
+                .map(ExemptionReason::as_str)
+                .unwrap_or("");
+            tracing::info!(
+                target: "capacity_admission",
+                workload = %summary.workload,
+                operation = %summary.operation,
+                decision = "exempt",
+                enforcement_mode = %summary.enforcement_mode,
+                exemption_reason = reason,
+                latency_ms = summary.latency_ms,
+                "admission allowed by exclusion policy"
             );
         }
         DecisionVerdict::Allow => {
@@ -723,6 +809,17 @@ fn emit_log(summary: &DecisionSummary) {
 /// refreshed when the decision had real figures (admit/deny), so they match the
 /// state used by the most recent decision (SC-003).
 fn record_metrics(metrics: &Metrics, summary: &DecisionSummary) {
+    if summary.verdict == DecisionVerdict::Exempt {
+        // spec-008: an exempt decision bypasses the budget. Bump the exemption
+        // counter (NOT the verdict counter) and skip the capacity gauges — no
+        // figures were computed (data-model §4.2). Latency is still observed
+        // (every decision, regardless of outcome).
+        if let Some(reason) = summary.exemption_reason {
+            metrics.record_exemption(reason.as_str());
+        }
+        metrics.observe_duration(summary.latency_ms as f64 / 1000.0);
+        return;
+    }
     for (resource, figures) in [
         (MetricResource::Cpu, &summary.cpu),
         (MetricResource::Memory, &summary.memory),
@@ -866,6 +963,17 @@ fn pod_request(pod: Option<&Pod>) -> Result<Figures, AdmissionError> {
     })
 }
 
+/// spec-008: extract the pod's `priorityClassName` for the exemption check
+/// (string match only — no PriorityClass resource resolution, R3). Absent on a
+/// missing object/spec.
+fn pod_priority_class(request: &AdmissionRequest<Pod>) -> Option<&str> {
+    request
+        .object
+        .as_ref()
+        .and_then(|pod| pod.spec.as_ref())
+        .and_then(|spec| spec.priority_class_name.as_deref())
+}
+
 /// `namespace/name` for the triggering workload.
 fn workload_of(request: &AdmissionRequest<Pod>) -> String {
     format!(
@@ -936,7 +1044,9 @@ fn request_meta_from_value(value: &serde_json::Value) -> RequestMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{Allocation, AllocationSpec, AllocationStatus, EnforcementMode};
+    use crate::crd::{
+        Allocation, AllocationSpec, AllocationStatus, EnforcementMode, ExemptionReason,
+    };
     use crate::time_util::parse_rfc3339;
     use k8s_openapi::api::core::v1::{Container, PodSpec, ResourceRequirements};
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -1014,6 +1124,8 @@ mod tests {
             AllocationSpec {
                 budget_percent: 80,
                 enforcement_mode: None,
+                excluded_namespaces: None,
+                excluded_priority_classes: None,
             },
         );
         a.status = Some(status);
@@ -1064,6 +1176,72 @@ mod tests {
         let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
         let mut allocation = allocation_with(status());
         allocation.spec.enforcement_mode = Some(mode);
+        writer.apply_watcher_event(&watcher::Event::Apply(allocation));
+        store
+    }
+
+    // ---- spec-008 exemption test fixtures ----
+
+    /// The webhook's own namespace used in the exemption tests (FR-007). Pods in
+    /// `"default"` (the existing fixtures) are NOT exempt, so those tests are
+    /// unaffected by the new check.
+    const WEBHOOK_NS: &str = "capacity-admission";
+
+    /// Build an `AdmissionRequest<Pod>` in `namespace` (mirrors [`request`]).
+    fn request_in(
+        namespace: &str,
+        obj: &Pod,
+        op: Operation,
+        old: Option<&Pod>,
+    ) -> AdmissionRequest<Pod> {
+        let object = serde_json::to_value(obj).unwrap();
+        let old_object = match old {
+            Some(o) => serde_json::to_value(o).unwrap(),
+            None => serde_json::Value::Null,
+        };
+        let op_str = operation_of(&op);
+        let review = serde_json::json!({
+            "kind": "AdmissionReview",
+            "apiVersion": "admission.k8s.io/v1",
+            "request": {
+                "uid": "uid-1",
+                "name": "p",
+                "namespace": namespace,
+                "kind": {"group": "", "version": "v1", "kind": "Pod"},
+                "resource": {"group": "", "version": "v1", "resource": "pods"},
+                "operation": op_str,
+                "userInfo": {"username": "test"},
+                "object": object,
+                "oldObject": old_object,
+                "dryRun": false,
+            }
+        });
+        let parsed: AdmissionReview<Pod> = serde_json::from_value(review).unwrap();
+        parsed.try_into().unwrap()
+    }
+
+    /// Build a pod with a single container and an optional `priorityClassName`.
+    fn pod_with_priority(cpu: &str, memory: &str, priority_class: Option<&str>) -> Pod {
+        let mut pod = pod(cpu, memory);
+        if let Some(pc) = priority_class
+            && let Some(spec) = pod.spec.as_mut()
+        {
+            spec.priority_class_name = Some(pc.to_string());
+        }
+        pod
+    }
+
+    /// A populated Allocation store whose singleton carries exclusion lists.
+    fn populated_store_excluded(
+        excluded_namespaces: Option<Vec<&str>>,
+        excluded_priority_classes: Option<Vec<&str>>,
+    ) -> Store<Allocation> {
+        let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+        let mut allocation = allocation_with(status());
+        allocation.spec.excluded_namespaces =
+            excluded_namespaces.map(|v| v.into_iter().map(String::from).collect());
+        allocation.spec.excluded_priority_classes =
+            excluded_priority_classes.map(|v| v.into_iter().map(String::from).collect());
         writer.apply_watcher_event(&watcher::Event::Apply(allocation));
         store
     }
@@ -1133,7 +1311,7 @@ mod tests {
         let req = request(&pod("1", "1"), Operation::Create, None);
         let (store, _writer) = kube::runtime::reflector::store::<Allocation>();
         let capacity = empty_capacity_store();
-        let outcome = evaluate(&req, &store, &capacity, now(), 30);
+        let outcome = evaluate(&req, &store, &capacity, now(), 30, WEBHOOK_NS);
         assert!(!outcome.response.allowed);
         assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
         assert_eq!(outcome.summary.reason, "capacity_data_missing");
@@ -1148,6 +1326,7 @@ mod tests {
             &populated_capacity_store(),
             now(),
             30,
+            WEBHOOK_NS,
         );
         assert!(outcome.response.allowed);
         assert_eq!(outcome.summary.verdict, DecisionVerdict::Allow);
@@ -1165,6 +1344,7 @@ mod tests {
             &populated_capacity_store(),
             now(),
             30,
+            WEBHOOK_NS,
         );
         assert!(!outcome.response.allowed);
         assert_eq!(outcome.summary.verdict, DecisionVerdict::Deny);
@@ -1189,6 +1369,7 @@ mod tests {
             &populated_capacity_store(),
             now(),
             30,
+            WEBHOOK_NS,
         );
         assert!(
             outcome.response.allowed,
@@ -1229,6 +1410,7 @@ mod tests {
             &populated_capacity_store(),
             now(),
             30,
+            WEBHOOK_NS,
         );
         assert!(
             !outcome.response.allowed,
@@ -1252,6 +1434,7 @@ mod tests {
             &populated_capacity_store(),
             now(),
             30,
+            WEBHOOK_NS,
         );
         assert!(outcome.response.allowed);
         assert_eq!(outcome.summary.verdict, DecisionVerdict::Allow);
@@ -1279,6 +1462,7 @@ mod tests {
             &populated_capacity_store(),
             now() + 60, // 60s older than the 30s threshold → stale
             30,
+            WEBHOOK_NS,
         );
         assert!(
             !outcome.response.allowed,
@@ -1299,7 +1483,14 @@ mod tests {
         // the fail-closed path is reached before any mode resolution.
         let req = request(&pod("15", "1"), Operation::Create, None);
         let (empty, _writer) = kube::runtime::reflector::store::<Allocation>();
-        let outcome = evaluate(&req, &empty, &populated_capacity_store(), now(), 30);
+        let outcome = evaluate(
+            &req,
+            &empty,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
         assert!(
             !outcome.response.allowed,
             "missing Allocation must reject in dry-run mode (FR-006)"
@@ -1318,6 +1509,7 @@ mod tests {
             &empty_capacity_store(),
             now(),
             30,
+            WEBHOOK_NS,
         );
         assert!(
             !outcome.response.allowed,
@@ -1343,6 +1535,7 @@ mod tests {
             freshness_seconds: 0,
             latency_ms: 1,
             enforcement_mode: "dry_run".to_string(),
+            exemption_reason: None,
             cpu: ResourceFigures {
                 resource: ResourceType::Cpu,
                 allocated: 70_000,
@@ -1372,6 +1565,66 @@ mod tests {
         );
     }
 
+    // ---- spec-008: Exempt verdict + exemptions counter (data-model §3.3/§4.2) ----
+
+    #[test]
+    fn decision_summary_exempt_constructor_sets_verdict_and_reason() {
+        // T005: the exempt() summary builder sets verdict=Exempt + the reason.
+        let req = request(&pod("1", "1"), Operation::Create, None);
+        let summary = DecisionSummary::exempt(
+            &req,
+            ExemptionReason::PriorityClass,
+            EnforcementMode::Enforce,
+        );
+        assert_eq!(summary.verdict, DecisionVerdict::Exempt);
+        assert_eq!(
+            summary.exemption_reason,
+            Some(ExemptionReason::PriorityClass)
+        );
+        assert_eq!(summary.enforcement_mode, "enforce");
+        assert_eq!(summary.workload, "default/p");
+        assert_eq!(summary.operation, "CREATE");
+    }
+
+    #[test]
+    fn record_metrics_exempt_bumps_exemptions_not_verdicts() {
+        // T005: an Exempt decision bumps capacity_admission_exemptions_total
+        // (with the reason label) and does NOT touch capacity_admission_verdicts_total.
+        // Latency is still observed (data-model §4.2); capacity gauges are not
+        // refreshed (no figures computed).
+        let metrics = Metrics::new();
+        let summary = DecisionSummary {
+            workload: "monitoring/p".to_string(),
+            operation: "CREATE".to_string(),
+            verdict: DecisionVerdict::Exempt,
+            exemption_reason: Some(ExemptionReason::Namespace),
+            reason: String::new(),
+            budget_percent: -1,
+            freshness_seconds: -1,
+            latency_ms: 2,
+            enforcement_mode: "enforce".to_string(),
+            cpu: ResourceFigures::default(),
+            memory: ResourceFigures {
+                resource: ResourceType::Memory,
+                ..ResourceFigures::default()
+            },
+        };
+        record_metrics(&metrics, &summary);
+        let text = metrics.render();
+        assert!(
+            text.contains(r#"capacity_admission_exemptions_total{reason="namespace"} 1"#),
+            "Exempt must bump the exemptions counter with the reason: {text}"
+        );
+        assert!(
+            text.contains(r#"capacity_admission_verdicts_total{resource="cpu",verdict="allow"} 0"#),
+            "Exempt must NOT bump the verdicts counter: {text}"
+        );
+        assert!(
+            text.contains("capacity_admission_decision_duration_seconds_count 1"),
+            "Exempt must still observe latency: {text}"
+        );
+    }
+
     #[test]
     fn evaluate_rejects_stale_data() {
         let req = request(&pod("5", "1Ki"), Operation::Create, None);
@@ -1382,6 +1635,7 @@ mod tests {
             &populated_capacity_store(),
             now() + 60,
             30,
+            WEBHOOK_NS,
         );
         assert!(!outcome.response.allowed);
         assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
@@ -1392,9 +1646,163 @@ mod tests {
     #[test]
     fn evaluate_rejects_missing_cluster_capacity() {
         let req = request(&pod("5", "1Ki"), Operation::Create, None);
-        let outcome = evaluate(&req, &populated_store(), &empty_capacity_store(), now(), 30);
+        let outcome = evaluate(
+            &req,
+            &populated_store(),
+            &empty_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
         assert!(!outcome.response.allowed);
         assert_eq!(outcome.summary.reason, "capacity_data_missing");
+    }
+
+    // ---- spec-008: exemption check in evaluate() (insertion point) ----
+    //
+    // The exemption check is a single check_exemption() call inserted AFTER the
+    // Allocation singleton + its status are found and BEFORE the freshness check
+    // (data-model 3.1). Fail-closed paths (missing allocation/status) reject
+    // before reaching it.
+
+    #[test]
+    fn evaluate_exempts_over_budget_pod_in_excluded_namespace() {
+        // T006/US1: an over-budget pod in an excluded namespace is admitted
+        // (Exempt) with no budget check.
+        let req = request_in("monitoring", &pod("15", "1"), Operation::Create, None);
+        let store = populated_store_excluded(Some(vec!["monitoring"]), None);
+        let outcome = evaluate(
+            &req,
+            &store,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
+        assert!(outcome.response.allowed, "excluded namespace -> admitted");
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Exempt);
+        assert_eq!(
+            outcome.summary.exemption_reason,
+            Some(ExemptionReason::Namespace)
+        );
+        assert!(
+            outcome.response.warnings.is_none(),
+            "an exempt admit carries no warning"
+        );
+    }
+
+    #[test]
+    fn evaluate_nonexempt_over_budget_pod_is_still_denied() {
+        // T006/US1 AC2: a non-excluded namespace is still budget-checked.
+        let req = request_in("app-team-a", &pod("15", "1"), Operation::Create, None);
+        let store = populated_store_excluded(Some(vec!["monitoring"]), None);
+        let outcome = evaluate(
+            &req,
+            &store,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
+        assert!(!outcome.response.allowed);
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Deny);
+    }
+
+    #[test]
+    fn evaluate_exempts_pod_in_webhook_namespace_with_empty_config() {
+        // T006/FR-007: the webhook's own namespace is exempt even with both
+        // exclusion lists empty ("empty CRD cache" = empty exclusion config).
+        let req = request_in(WEBHOOK_NS, &pod("15", "1"), Operation::Create, None);
+        let store = populated_store_excluded(None, None);
+        let outcome = evaluate(
+            &req,
+            &store,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
+        assert!(outcome.response.allowed, "webhook ns -> exempt (FR-007)");
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Exempt);
+        assert_eq!(
+            outcome.summary.exemption_reason,
+            Some(ExemptionReason::WebhookNamespace)
+        );
+    }
+
+    #[test]
+    fn evaluate_exempts_pod_by_priority_class() {
+        // T006/US2: an over-budget pod with an excluded priority class is
+        // admitted regardless of namespace.
+        let req = request_in(
+            "app-team-a",
+            &pod_with_priority("15", "1", Some("system-node-critical")),
+            Operation::Create,
+            None,
+        );
+        let store = populated_store_excluded(None, Some(vec!["system-node-critical"]));
+        let outcome = evaluate(
+            &req,
+            &store,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
+        assert!(outcome.response.allowed);
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Exempt);
+        assert_eq!(
+            outcome.summary.exemption_reason,
+            Some(ExemptionReason::PriorityClass)
+        );
+    }
+
+    #[test]
+    fn evaluate_excluded_pod_still_rejected_when_status_missing() {
+        // T006 fail-closed integrity: a pod in an excluded namespace whose
+        // Allocation status is missing is rejected BEFORE the exemption check.
+        let req = request_in("monitoring", &pod("15", "1"), Operation::Create, None);
+        let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+        let mut allocation = allocation_with(status());
+        allocation.status = None; // status missing -> reject before exemption.
+        allocation.spec.excluded_namespaces = Some(vec!["monitoring".to_string()]);
+        writer.apply_watcher_event(&watcher::Event::Apply(allocation));
+        let outcome = evaluate(
+            &req,
+            &store,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
+        assert!(
+            !outcome.response.allowed,
+            "missing status rejects before exemption (fail-closed)"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+        assert_eq!(outcome.summary.reason, "capacity_data_missing");
+    }
+
+    #[test]
+    fn evaluate_excluded_pod_still_rejected_when_allocation_missing() {
+        // T006 fail-closed integrity: a missing Allocation singleton rejects even
+        // a webhook-namespace pod. Cold-start self-exemption at this layer is the
+        // apiserver namespaceSelector's job (FR-009 / research R4).
+        let req = request_in(WEBHOOK_NS, &pod("15", "1"), Operation::Create, None);
+        let (empty, _writer) = kube::runtime::reflector::store::<Allocation>();
+        let outcome = evaluate(
+            &req,
+            &empty,
+            &populated_capacity_store(),
+            now(),
+            30,
+            WEBHOOK_NS,
+        );
+        assert!(
+            !outcome.response.allowed,
+            "missing Allocation rejects before exemption (fail-closed)"
+        );
+        assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
     }
 
     // ---- assess_freshness ----

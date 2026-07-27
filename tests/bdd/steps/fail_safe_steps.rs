@@ -122,6 +122,8 @@ impl FailSafeWorld {
                 AllocationSpec {
                     budget_percent: self.budget_percent,
                     enforcement_mode: None,
+                    excluded_namespaces: None,
+                    excluded_priority_classes: None,
                 },
             );
             a.status = Some(AllocationStatus {
@@ -151,6 +153,7 @@ impl FailSafeWorld {
             Arc::new(self.capacity_store.clone()),
             Arc::new(move || now),
             Arc::new(Metrics::new()),
+            "capacity-admission".to_string(),
         );
         self.last = Some(handle(body, &state).await);
     }

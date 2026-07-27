@@ -113,6 +113,8 @@ impl CapacityWorld {
                 AllocationSpec {
                     budget_percent: self.budget_percent,
                     enforcement_mode: None,
+                    excluded_namespaces: None,
+                    excluded_priority_classes: None,
                 },
             );
             a.status = Some(AllocationStatus {
@@ -135,6 +137,7 @@ impl CapacityWorld {
             Arc::new(self.capacity_store.clone()),
             Arc::new(fixed_now) as Clock,
             Arc::clone(&self.metrics),
+            "capacity-admission".to_string(),
         );
         self.last = Some(handle(body, &state).await);
     }
