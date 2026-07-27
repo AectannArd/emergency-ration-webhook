@@ -175,7 +175,9 @@ fn classify_create<T>(result: &Result<T, kube::Error>) -> CreateOutcome {
 }
 
 /// The default `cluster-capacity` instance created when the singleton is absent:
-/// empty spec (the CRD is supply-side and controller-written, no user fields).
+/// no `nodeSelector` configured (unschedulable-only exclusion, FR-005). An
+/// existing instance is never overwritten, so an operator-set `nodeSelector` is
+/// preserved across restarts.
 fn default_capacity_singleton() -> ClusterCapacity {
     ClusterCapacity::new(
         CLUSTER_CAPACITY_NAME,
