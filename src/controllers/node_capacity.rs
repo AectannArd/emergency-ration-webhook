@@ -328,7 +328,10 @@ async fn patch_once(
 /// the initial node list is delivered (and the Allocation Controller, which
 /// derives its ceiling from this supply, then has nothing to compute from).
 /// Later node events from the reflector keep the status fresh.
-async fn reconcile_now(nodes: &Api<Node>, capacity_api: &Api<ClusterCapacity>) {
+///
+/// Public so the mock-apiserver integration tests can drive the exact reconcile
+/// path (read selector → list nodes → sum → patch) rather than duplicating it.
+pub async fn reconcile_now(nodes: &Api<Node>, capacity_api: &Api<ClusterCapacity>) {
     // spec-006 US2 (T032): read the runtime nodeSelector from the singleton spec
     // so a kubectl patch takes effect without a restart (FR-007/FR-011).
     let selector = read_selector(capacity_api).await;

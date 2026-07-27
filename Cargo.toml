@@ -39,6 +39,11 @@ path = "tests/integration/fail_safe.rs"
 name = "dry_run"
 path = "tests/integration/dry_run.rs"
 
+# spec-006: node-filter integration tests (mock apiserver).
+[[test]]
+name = "node_filter"
+path = "tests/integration/node_filter.rs"
+
 [[test]]
 name = "performance"
 path = "tests/integration/performance.rs"
@@ -61,6 +66,12 @@ harness = false
 [[test]]
 name = "dry_run_bdd"
 path = "tests/bdd/steps/dry_run_steps.rs"
+harness = false
+
+# spec-006: node-filter BDD scenarios (@cordon / @selector / @observability).
+[[test]]
+name = "node_filter_bdd"
+path = "tests/bdd/steps/node_filter_steps.rs"
 harness = false
 
 # spec-005: unit tests for the verify tool's pure modules (report rendering,
