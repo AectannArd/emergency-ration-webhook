@@ -35,6 +35,14 @@ no user-configurable fields.
 spec: {}
 ```
 
+> **Spec evolution (spec-006):** the spec gained an optional `nodeSelector`
+> field — a standard Kubernetes `LabelSelector` for excluding nodes (e.g.
+> control-plane nodes) from the capacity aggregate. The full schema, semantics,
+> and configuration examples live in the delta contract
+> [`specs/006-schedulable-node-filter/contracts/clustercapacity-crd.md`](../../006-schedulable-node-filter/contracts/clustercapacity-crd.md).
+> When `nodeSelector` is absent, behaviour is unchanged (unschedulable nodes are
+> excluded by default).
+
 ---
 
 ## Status
@@ -56,6 +64,12 @@ status:
 | `totalAllocatableMemoryBytes` | int64 | Sum of `node.status.allocatable.memory` across all nodes, in bytes. |
 | `nodeCount` | int32 | Number of nodes included in the sum. |
 | `lastUpdated` | string (RFC 3339) | Timestamp of the last recomputation. Used by the webhook for freshness checks. |
+
+> **Status evolution (spec-006):** the status gained three observability fields
+> — `excludedNodeCount`, `excludedByUnschedulable`, `excludedBySelector` —
+> reporting how many nodes were excluded from the aggregate and why. See the
+> delta contract
+> [`specs/006-schedulable-node-filter/contracts/clustercapacity-crd.md`](../../006-schedulable-node-filter/contracts/clustercapacity-crd.md).
 
 ---
 
