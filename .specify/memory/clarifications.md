@@ -178,3 +178,45 @@ Data flow:
   isolation (Principle VIII).
 - This feature does NOT amend the constitution — it verifies the existing 12
   principles hold on real infrastructure. No new principle is needed.
+
+## Session 2026-07-27 (spec-006: schedulable-node-filter)
+
+> Produced by `/speckit-clarify` ahead of `/speckit-specify` for the node
+> exclusion feature — excluding non-schedulable nodes from the cluster capacity
+> aggregate so the reported budget matches what kube-scheduler can actually
+> place workloads on.
+
+- Q: Which nodes should the operator exclude from the capacity pool, and should
+  the exclusion be configurable?
+  → A: **Exclude unschedulable nodes by default + provide a configurable label
+  selector for arbitrary node-subset exclusion.** This is a two-layer design:
+  (1) `spec.unschedulable = true` (cordoned nodes) are always excluded — this is
+  a correctness fix, not optional; (2) an optional Kubernetes LabelSelector on
+  the ClusterCapacity CRD spec lets operators exclude any arbitrary node subset
+  by label (e.g. control-plane nodes via `node-role.kubernetes.io/control-plane:
+  Exists`). The label selector is additive: a node is counted only if it is
+  schedulable AND does not match the selector.
+
+### Design consequences (carried into specify)
+
+- The exclusion is **not** based on taints/tolerations. Taint matching is the
+  kube-scheduler's responsibility (Constitution Principle V — separated
+  concerns). A tainted-but-schedulable node with no label-selector match is
+  counted. Operators who need to exclude such nodes use the label selector or
+  cordon.
+- The default unschedulable exclusion **cannot be disabled** — counting
+  cordoned nodes would reintroduce the original phantom-capacity bug.
+- The label selector follows standard Kubernetes LabelSelector semantics
+  (matchLabels + matchExpressions) — no custom dialect, maximum familiarity.
+- The selector is optional; absent/empty means "unschedulable-only exclusion"
+  (backward compatible with existing deployments).
+- The selector is read from the ClusterCapacity CRD spec on each reconciliation
+  cycle — runtime-configurable via `kubectl patch`, no restart needed
+  (consistent with the Allocation CRD threshold pattern).
+- The status gains observability fields: excluded node count + reason
+  breakdown (unschedulable vs label-matched), per Principle IV.
+- Demand side (Allocation Controller) is unaffected — pods on excluded nodes
+  still count against the budget (they consume real resources).
+- This feature does NOT amend the constitution — it fixes a correctness gap
+  (Principle II: capacity as a hard budget requires accurate supply) and adds
+  configurability within the existing 3-component architecture (Principle V).
