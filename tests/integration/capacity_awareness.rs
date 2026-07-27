@@ -63,7 +63,7 @@ fn populated_capacity_store() -> Store<ClusterCapacity> {
     let mut capacity = ClusterCapacity::new(
         CLUSTER_CAPACITY_NAME,
         ClusterCapacitySpec {
-            node_selector: None,
+            node_selectors: None,
         },
     );
     capacity.status = Some(ClusterCapacityStatus {

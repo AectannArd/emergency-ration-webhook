@@ -5,9 +5,10 @@
 //! 1. **Default (unschedulable)**: a node with `spec.unschedulable = true` is
 //!    never counted (FR-001). This cannot be disabled — it fixes the
 //!    phantom-capacity bug where cordoned/control-plane nodes inflated the pool.
-//! 2. **Selector**: a node matching the optional `ClusterCapacity.spec.nodeSelector`
-//!    is not counted (FR-003). An absent or empty selector matches nothing, so
-//!    only unschedulable nodes are excluded (FR-005).
+//! 2. **Selector**: a node matching ANY selector in the optional
+//!    `ClusterCapacity.spec.nodeSelectors` list is not counted (FR-003, OR
+//!    semantics per spec-007). An absent or empty list matches nothing, so only
+//!    unschedulable nodes are excluded (FR-005).
 //!
 //! A node counted toward capacity must pass *both* layers (FR-004). The module is
 //! pure — no I/O, no client, no async — so every branch is unit-testable in
@@ -89,7 +90,7 @@ pub struct ExclusionBreakdown {
     pub counted: i32,
     /// Nodes excluded because `spec.unschedulable = true` (layer 1).
     pub excluded_unschedulable: i32,
-    /// Nodes excluded because they matched `spec.nodeSelector` (layer 2).
+    /// Nodes excluded because they matched `spec.nodeSelectors` (layer 2).
     pub excluded_by_selector: i32,
 }
 
@@ -169,44 +170,54 @@ fn selector_is_empty(selector: &LabelSelector) -> bool {
     no_labels && no_exprs
 }
 
+/// `true` iff `labels` match ANY selector in the list — the OR semantics of
+/// spec-007. Each selector is evaluated with standard `LabelSelector` AND
+/// semantics via [`labels_match_selector`]; the list-level result is OR.
+///
+/// An empty selector (the Kubernetes "matches all" wildcard) is treated as a
+/// no-op here — it is skipped rather than short-circuiting the OR to a
+/// match-all — so that `nodeSelectors: [{}]` excludes nothing, preserving
+/// FR-005 ("an empty selector excludes nothing").
+fn labels_match_any_selector(
+    labels: &BTreeMap<String, String>,
+    selectors: &[LabelSelector],
+) -> bool {
+    selectors
+        .iter()
+        .any(|sel| !selector_is_empty(sel) && labels_match_selector(labels, sel))
+}
+
 /// The core predicate: should `node` count toward the capacity aggregate?
 ///
 /// - `unschedulable` — `node.spec.unschedulable.unwrap_or(false)`.
 /// - `labels` — `node.metadata.labels`.
-/// - `selector` — the optional `ClusterCapacity.spec.nodeSelector`.
+/// - `selectors` — the optional `ClusterCapacity.spec.nodeSelectors` list.
 ///
-/// Returns `false` if the node is unschedulable (FR-001) or matches a non-empty
-/// valid selector (FR-003); `true` otherwise. A `None`/empty selector disables
-/// layer 2 (FR-005). A structurally invalid selector is ignored (defensive — the
-/// controller pre-validates and falls back to unschedulable-only, FR-010).
+/// Returns `false` if the node is unschedulable (FR-001) or matches ANY non-empty
+/// selector in the list (FR-003, OR semantics); `true` otherwise. A `None` or
+/// empty list disables layer 2 (FR-005). The controller pre-filters invalid
+/// selectors via `effective_selectors` (FR-010); empty selectors are no-ops
+/// (FR-005), skipped inside [`labels_match_any_selector`].
 pub fn is_node_counted(
     unschedulable: bool,
     labels: Option<&BTreeMap<String, String>>,
-    selector: Option<&LabelSelector>,
+    selectors: Option<&[LabelSelector]>,
 ) -> bool {
     // FR-001: unschedulable nodes are always excluded (the default, cannot disable).
     if unschedulable {
         return false;
     }
-    // FR-005: no selector configured → counted (unschedulable-only exclusion).
-    let Some(sel) = selector else {
+    // FR-005: no selectors configured (None or an empty list) → counted
+    // (unschedulable-only exclusion).
+    let Some(sels) = selectors.filter(|s| !s.is_empty()) else {
         return true;
     };
-    // FR-005: an empty selector matches all nodes → excludes nothing → counted.
-    if selector_is_empty(sel) {
-        return true;
-    }
-    // Defensive: never apply a structurally-invalid selector. The controller
-    // validates once per cycle and passes None on error, so this is a backstop.
-    if validate_selector(sel).is_err() {
-        return true;
-    }
     // A node with no labels cannot match a non-empty selector → counted.
     let Some(node_labels) = labels else {
         return true;
     };
-    // FR-003: a node matching the selector is excluded.
-    !labels_match_selector(node_labels, sel)
+    // FR-003: a node matching ANY selector is excluded.
+    !labels_match_any_selector(node_labels, sels)
 }
 
 #[cfg(test)]
@@ -236,7 +247,11 @@ mod tests {
             "Exists",
             None,
         )]);
-        assert!(!is_node_counted(false, Some(&labels), Some(&sel)));
+        assert!(!is_node_counted(
+            false,
+            Some(&labels),
+            Some([sel].as_slice())
+        ));
     }
 
     #[test]
@@ -245,7 +260,11 @@ mod tests {
         // (passes both exclusion layers — FR-004).
         let labels = labels_of(&[("role", "worker")]);
         let sel = selector(vec![expr("role", "In", Some(&["control-plane"]))]);
-        assert!(is_node_counted(false, Some(&labels), Some(&sel)));
+        assert!(is_node_counted(
+            false,
+            Some(&labels),
+            Some([sel].as_slice())
+        ));
     }
 
     #[test]
@@ -257,7 +276,97 @@ mod tests {
             match_labels: None,
             match_expressions: None,
         };
-        assert!(is_node_counted(false, Some(&labels), Some(&empty)));
+        assert!(is_node_counted(
+            false,
+            Some(&labels),
+            Some([empty].as_slice())
+        ));
+    }
+
+    // ---- spec-007 US1: multi-selector OR semantics ----
+
+    #[test]
+    fn labels_match_any_selector_matches_when_one_of_many_matches() {
+        // T008: a node matching 1 of 3 selectors → true (OR semantics).
+        let labels = labels_of(&[("node-role.kubernetes.io/control-plane", "")]);
+        let selectors = vec![
+            selector(vec![expr("node-type/experimental", "Exists", None)]),
+            selector(vec![expr(
+                "node-role.kubernetes.io/control-plane",
+                "Exists",
+                None,
+            )]),
+            selector(vec![expr("tier", "In", Some(&["edge"]))]),
+        ];
+        assert!(labels_match_any_selector(&labels, &selectors));
+    }
+
+    #[test]
+    fn labels_match_any_selector_false_when_none_match() {
+        // T008: a node matching none of the selectors → false.
+        let labels = labels_of(&[("role", "worker")]);
+        let selectors = vec![
+            selector(vec![expr(
+                "node-role.kubernetes.io/control-plane",
+                "Exists",
+                None,
+            )]),
+            selector(vec![expr("node-type/experimental", "Exists", None)]),
+        ];
+        assert!(!labels_match_any_selector(&labels, &selectors));
+    }
+
+    #[test]
+    fn labels_match_any_selector_false_for_empty_selector_list() {
+        // T008: an empty selector list matches nothing → false.
+        let labels = labels_of(&[("role", "worker")]);
+        assert!(!labels_match_any_selector(&labels, &[]));
+    }
+
+    #[test]
+    fn is_node_counted_excludes_when_matching_any_selector() {
+        // T009: matching ANY selector in the list excludes the node.
+        let labels = labels_of(&[("node-role.kubernetes.io/control-plane", "")]);
+
+        // A list with only the matching selector → excluded.
+        let matching = vec![selector(vec![expr(
+            "node-role.kubernetes.io/control-plane",
+            "Exists",
+            None,
+        )])];
+        assert!(!is_node_counted(
+            false,
+            Some(&labels),
+            Some(matching.as_slice())
+        ));
+
+        // A non-matching then a matching selector → excluded (ANY match wins).
+        let mixed = vec![
+            selector(vec![expr("role", "In", Some(&["edge"]))]),
+            selector(vec![expr(
+                "node-role.kubernetes.io/control-plane",
+                "Exists",
+                None,
+            )]),
+        ];
+        assert!(!is_node_counted(
+            false,
+            Some(&labels),
+            Some(mixed.as_slice())
+        ));
+
+        // A list with only a non-matching selector → counted.
+        let worker_labels = labels_of(&[("role", "worker")]);
+        let non_matching = vec![selector(vec![expr(
+            "node-role.kubernetes.io/control-plane",
+            "Exists",
+            None,
+        )])];
+        assert!(is_node_counted(
+            false,
+            Some(&worker_labels),
+            Some(non_matching.as_slice())
+        ));
     }
 
     // ---- spec-006 US2: validate_selector (T025) ----
