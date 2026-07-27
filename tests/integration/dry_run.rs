@@ -54,7 +54,12 @@ fn spec_allocation_status() -> AllocationStatus {
 /// Capacity store with 100 CPU / 200 GiB total allocatable (feeds the ceilings).
 fn capacity_store() -> Store<ClusterCapacity> {
     let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-    let mut c = ClusterCapacity::new("cluster-capacity", ClusterCapacitySpec { node_selector: None });
+    let mut c = ClusterCapacity::new(
+        "cluster-capacity",
+        ClusterCapacitySpec {
+            node_selector: None,
+        },
+    );
     c.status = Some(ClusterCapacityStatus {
         total_allocatable_cpu_milli: 100_000,
         total_allocatable_memory_bytes: 200 * GIB,

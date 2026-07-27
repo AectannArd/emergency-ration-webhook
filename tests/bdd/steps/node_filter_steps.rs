@@ -46,7 +46,7 @@ fn make_node(name: &str, cpu: &str, memory: &str, labels: &[(&str, &str)], cordo
     node
 }
 
-#[derive(cucumber::World)]
+#[derive(cucumber::World, Default)]
 struct NodeFilterWorld {
     nodes: Vec<Node>,
     selector: Option<LabelSelector>,
@@ -61,16 +61,6 @@ impl std::fmt::Debug for NodeFilterWorld {
             .field("has_selector", &self.selector.is_some())
             .field("counted", &self.result.as_ref().map(|r| r.2))
             .finish()
-    }
-}
-
-impl Default for NodeFilterWorld {
-    fn default() -> Self {
-        Self {
-            nodes: Vec::new(),
-            selector: None,
-            result: None,
-        }
     }
 }
 
@@ -118,13 +108,10 @@ fn worker_and_control_plane_nodes(world: &mut NodeFilterWorld, workers: i64, con
     }
 }
 
-#[given(expr = "a cluster with {int} nodes where {int} is cordoned and {int} matches the nodeSelector")]
-fn mixed_cluster(
-    world: &mut NodeFilterWorld,
-    total: i64,
-    cordoned: i64,
-    matched: i64,
-) {
+#[given(
+    expr = "a cluster with {int} nodes where {int} is cordoned and {int} matches the nodeSelector"
+)]
+fn mixed_cluster(world: &mut NodeFilterWorld, total: i64, cordoned: i64, matched: i64) {
     let workers = total - cordoned - matched;
     for i in 0..workers {
         world.nodes.push(make_node(
@@ -136,13 +123,9 @@ fn mixed_cluster(
         ));
     }
     for i in 0..cordoned {
-        world.nodes.push(make_node(
-            &format!("cordoned-{i}"),
-            "16",
-            "32Gi",
-            &[],
-            true,
-        ));
+        world
+            .nodes
+            .push(make_node(&format!("cordoned-{i}"), "16", "32Gi", &[], true));
     }
     for i in 0..matched {
         world.nodes.push(make_node(
@@ -194,11 +177,7 @@ fn reconcile(world: &mut NodeFilterWorld) {
 fn status_node_count(world: &mut NodeFilterWorld, expected: i64) {
     world.reconcile();
     let (_, _, counted, _) = world.result.as_ref().expect("reconciled");
-    assert_eq!(
-        *counted as i64,
-        expected,
-        "expected nodeCount {expected}"
-    );
+    assert_eq!(*counted as i64, expected, "expected nodeCount {expected}");
 }
 
 #[then(expr = "the excludedByUnschedulable count is {int}")]
@@ -226,7 +205,8 @@ fn excluded_node_count(world: &mut NodeFilterWorld, expected: i64) {
     world.reconcile();
     let (_, _, _, breakdown) = world.result.as_ref().expect("reconciled");
     assert_eq!(
-        breakdown.excluded_node_count() as i64, expected,
+        breakdown.excluded_node_count() as i64,
+        expected,
         "expected excludedNodeCount {expected}"
     );
 }

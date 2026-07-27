@@ -85,7 +85,12 @@ impl CapacityWorld {
     /// caches, then run a pod through the admission handler.
     async fn submit(&mut self, request_cpu_milli: i64, request_mem_bytes: i64) {
         let capacity = {
-            let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
+            let mut c = ClusterCapacity::new(
+                CLUSTER_CAPACITY_NAME,
+                ClusterCapacitySpec {
+                    node_selector: None,
+                },
+            );
             c.status = Some(ClusterCapacityStatus {
                 total_allocatable_cpu_milli: self.total_cpu_milli,
                 total_allocatable_memory_bytes: self.total_mem_bytes,

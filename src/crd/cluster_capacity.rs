@@ -88,7 +88,12 @@ mod tests {
 
     #[test]
     fn singleton_constructs_with_empty_spec() {
-        let cc = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
+        let cc = ClusterCapacity::new(
+            CLUSTER_CAPACITY_NAME,
+            ClusterCapacitySpec {
+                node_selector: None,
+            },
+        );
         assert_eq!(cc.metadata.name.as_deref(), Some(CLUSTER_CAPACITY_NAME));
     }
 
@@ -185,7 +190,9 @@ mod tests {
         let crd = ClusterCapacity::crd();
         let v = serde_json::to_value(&crd).unwrap();
         let node_selector = v
-            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/nodeSelector")
+            .pointer(
+                "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/nodeSelector",
+            )
             .expect("nodeSelector schema present under spec");
         assert_eq!(
             node_selector.get("type").and_then(|t| t.as_str()),
@@ -193,9 +200,8 @@ mod tests {
             "nodeSelector is an object-typed field"
         );
         // Optional: nodeSelector must NOT be in the spec `required` array.
-        let required = v.pointer(
-            "/spec/versions/0/schema/openAPIV3Schema/properties/spec/required",
-        );
+        let required =
+            v.pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/required");
         let lists_selector = required.is_some_and(|arr| {
             arr.as_array()
                 .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("nodeSelector")))

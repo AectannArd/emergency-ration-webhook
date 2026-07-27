@@ -1034,7 +1034,12 @@ mod tests {
     fn populated_capacity_store() -> Store<ClusterCapacity> {
         use crate::crd::{ClusterCapacity, ClusterCapacitySpec, ClusterCapacityStatus};
         let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-        let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
+        let mut c = ClusterCapacity::new(
+            CLUSTER_CAPACITY_NAME,
+            ClusterCapacitySpec {
+                node_selector: None,
+            },
+        );
         c.status = Some(ClusterCapacityStatus {
             total_allocatable_cpu_milli: 100_000,
             total_allocatable_memory_bytes: 200 * 1024 * 1024 * 1024,

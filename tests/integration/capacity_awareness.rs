@@ -60,7 +60,12 @@ fn populated_allocation_store() -> Store<Allocation> {
 /// Capacity store: 100 CPU / 200 GiB total allocatable (feeds the gauges).
 fn populated_capacity_store() -> Store<ClusterCapacity> {
     let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-    let mut capacity = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
+    let mut capacity = ClusterCapacity::new(
+        CLUSTER_CAPACITY_NAME,
+        ClusterCapacitySpec {
+            node_selector: None,
+        },
+    );
     capacity.status = Some(ClusterCapacityStatus {
         total_allocatable_cpu_milli: 100_000,
         total_allocatable_memory_bytes: 200 * GIB,

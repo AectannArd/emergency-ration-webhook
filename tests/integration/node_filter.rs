@@ -16,9 +16,11 @@
 
 use axum::http::{Request, Response, StatusCode};
 use capacity_admission_webhook::controllers::node_capacity::reconcile_now;
-use k8s_openapi::api::core::v1::Node;
-use capacity_admission_webhook::crd::{CLUSTER_CAPACITY_NAME, ClusterCapacity, ClusterCapacitySpec};
+use capacity_admission_webhook::crd::{
+    CLUSTER_CAPACITY_NAME, ClusterCapacity, ClusterCapacitySpec,
+};
 use http_body_util::BodyExt;
+use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
 use kube::client::{Body, ClientBuilder};
 use kube::{Api, Client};
@@ -184,7 +186,10 @@ async fn selector_excludes_control_plane_nodes_from_capacity() {
         payload["status"]["totalAllocatableCpuMilli"].as_i64(),
         Some(16_000)
     );
-    assert_eq!(payload["status"]["excludedByUnschedulable"].as_i64(), Some(0));
+    assert_eq!(
+        payload["status"]["excludedByUnschedulable"].as_i64(),
+        Some(0)
+    );
     assert_eq!(payload["status"]["excludedBySelector"].as_i64(), Some(1));
     assert_eq!(payload["status"]["excludedNodeCount"].as_i64(), Some(1));
     respond.send_response(ok(&default_capacity()));

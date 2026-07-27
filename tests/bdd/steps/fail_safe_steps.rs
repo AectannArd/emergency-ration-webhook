@@ -94,7 +94,12 @@ impl FailSafeWorld {
 
         // ClusterCapacity cache (unless the scenario removes it).
         if !matches!(self.failure, Failure::NoCapacity) {
-            let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
+            let mut c = ClusterCapacity::new(
+                CLUSTER_CAPACITY_NAME,
+                ClusterCapacitySpec {
+                    node_selector: None,
+                },
+            );
             c.status = Some(ClusterCapacityStatus {
                 total_allocatable_cpu_milli: self.total_cpu_milli,
                 total_allocatable_memory_bytes: self.total_mem_bytes,

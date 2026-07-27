@@ -91,9 +91,7 @@ where
 /// keeps capacity tracking functional. Validity is re-checked on every event, so
 /// a corrected selector takes effect immediately.
 fn effective_selector(selector: Option<&LabelSelector>) -> Option<&LabelSelector> {
-    let Some(sel) = selector else {
-        return None;
-    };
+    let sel = selector?;
     match validate_selector(sel) {
         Ok(()) => Some(sel),
         Err(err) => {
@@ -179,7 +177,12 @@ fn classify_create<T>(result: &Result<T, kube::Error>) -> CreateOutcome {
 /// The default `cluster-capacity` instance created when the singleton is absent:
 /// empty spec (the CRD is supply-side and controller-written, no user fields).
 fn default_capacity_singleton() -> ClusterCapacity {
-    ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None })
+    ClusterCapacity::new(
+        CLUSTER_CAPACITY_NAME,
+        ClusterCapacitySpec {
+            node_selector: None,
+        },
+    )
 }
 
 /// Idempotent get-or-create of the `cluster-capacity` singleton.
@@ -513,7 +516,11 @@ mod tests {
         // 3 nodes, one cordoned. The aggregate reflects only the 2 schedulable
         // nodes; the breakdown reports 1 excluded-by-unschedulable (FR-001).
         use crate::controllers::node_filter::ExclusionBreakdown;
-        let nodes = vec![node("a", "8", "16Gi"), node("b", "4", "8Gi"), cordoned("cp", "16", "32Gi")];
+        let nodes = vec![
+            node("a", "8", "16Gi"),
+            node("b", "4", "8Gi"),
+            cordoned("cp", "16", "32Gi"),
+        ];
         let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, None);
         assert_eq!(cpu, 12_000, "only the 2 schedulable nodes' CPU counts");
         assert_eq!(memory, 24 * 1024 * 1024 * 1024);
@@ -714,7 +721,9 @@ mod tests {
     fn existing_singleton_is_not_recreated() {
         let lookup: Result<ClusterCapacity, kube::Error> = Ok(ClusterCapacity::new(
             CLUSTER_CAPACITY_NAME,
-            ClusterCapacitySpec { node_selector: None },
+            ClusterCapacitySpec {
+                node_selector: None,
+            },
         ));
         // Exists ⇒ ensure_singleton does not call create (no overwrite).
         assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
@@ -972,7 +981,10 @@ mod tests {
         // spec-006: the exclusion breakdown is always patched (here 0 — the
         // single mock node is schedulable and no selector is configured).
         assert_eq!(payload["status"]["excludedNodeCount"].as_i64(), Some(0));
-        assert_eq!(payload["status"]["excludedByUnschedulable"].as_i64(), Some(0));
+        assert_eq!(
+            payload["status"]["excludedByUnschedulable"].as_i64(),
+            Some(0)
+        );
         assert_eq!(payload["status"]["excludedBySelector"].as_i64(), Some(0));
         respond.send_response(ok_object(&default_capacity_singleton()));
 

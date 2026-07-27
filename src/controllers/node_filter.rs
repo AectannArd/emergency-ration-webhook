@@ -45,10 +45,7 @@ pub fn validate_selector(selector: &LabelSelector) -> Result<(), SelectorError> 
         return Ok(());
     };
     for req in expressions {
-        let has_values = req
-            .values
-            .as_ref()
-            .is_some_and(|values| !values.is_empty());
+        let has_values = req.values.as_ref().is_some_and(|values| !values.is_empty());
         match req.operator.as_str() {
             "In" | "NotIn" => {
                 if !has_values {
@@ -161,11 +158,14 @@ fn labels_match_selector(labels: &BTreeMap<String, String>, selector: &LabelSele
 /// `true` iff the selector has no `matchLabels` and no `matchExpressions` — the
 /// Kubernetes "matches all" wildcard. FR-005: such a selector excludes nothing.
 fn selector_is_empty(selector: &LabelSelector) -> bool {
-    let no_labels = selector.match_labels.as_ref().map_or(true, BTreeMap::is_empty);
+    let no_labels = selector
+        .match_labels
+        .as_ref()
+        .is_none_or(BTreeMap::is_empty);
     let no_exprs = selector
         .match_expressions
         .as_ref()
-        .map_or(true, Vec::is_empty);
+        .is_none_or(Vec::is_empty);
     no_labels && no_exprs
 }
 
@@ -282,19 +282,23 @@ mod tests {
     #[test]
     fn validate_selector_accepts_valid_operators() {
         // In/NotIn with non-empty values; Exists/DoesNotExist without values.
-        assert!(validate_selector(&selector(vec![
-            expr("role", "In", Some(&["control-plane"])),
-            expr("tier", "NotIn", Some(&["edge"])),
-            expr("zone", "Exists", None),
-            expr("legacy", "DoesNotExist", None),
-        ]))
-        .is_ok());
+        assert!(
+            validate_selector(&selector(vec![
+                expr("role", "In", Some(&["control-plane"])),
+                expr("tier", "NotIn", Some(&["edge"])),
+                expr("zone", "Exists", None),
+                expr("legacy", "DoesNotExist", None),
+            ]))
+            .is_ok()
+        );
         // An empty selector is structurally valid (it matches all nodes).
-        assert!(validate_selector(&LabelSelector {
-            match_labels: None,
-            match_expressions: None
-        })
-        .is_ok());
+        assert!(
+            validate_selector(&LabelSelector {
+                match_labels: None,
+                match_expressions: None
+            })
+            .is_ok()
+        );
     }
 
     #[test]
@@ -361,21 +365,30 @@ mod tests {
         // T020: every {key,value} in matchLabels must be present in the node's
         // labels. All present → match.
         let labels = labels_of(&[("role", "worker"), ("zone", "a")]);
-        assert!(labels_match_selector(&labels, &match_labels_of(&[("role", "worker")])));
+        assert!(labels_match_selector(
+            &labels,
+            &match_labels_of(&[("role", "worker")])
+        ));
     }
 
     #[test]
     fn match_labels_value_mismatch_does_not_match() {
         // T020: key present but value differs → no match.
         let labels = labels_of(&[("role", "worker")]);
-        assert!(!labels_match_selector(&labels, &match_labels_of(&[("role", "control-plane")])));
+        assert!(!labels_match_selector(
+            &labels,
+            &match_labels_of(&[("role", "control-plane")])
+        ));
     }
 
     #[test]
     fn match_labels_missing_key_does_not_match() {
         // T020: a key absent from the node's labels → no match.
         let labels = labels_of(&[("role", "worker")]);
-        assert!(!labels_match_selector(&labels, &match_labels_of(&[("tier", "system")])));
+        assert!(!labels_match_selector(
+            &labels,
+            &match_labels_of(&[("tier", "system")])
+        ));
     }
 
     #[test]
@@ -469,4 +482,3 @@ mod tests {
         assert!(!labels_match_selector(&labels, &sel_fail));
     }
 }
-
