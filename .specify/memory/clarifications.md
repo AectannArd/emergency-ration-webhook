@@ -220,3 +220,34 @@ Data flow:
 - This feature does NOT amend the constitution — it fixes a correctness gap
   (Principle II: capacity as a hard budget requires accurate supply) and adds
   configurability within the existing 3-component architecture (Principle V).
+
+## Session 2026-07-27 (spec-007: multi-selector-exclusion)
+
+> Produced inline ahead of `/speckit-specify` for the multi-selector node
+> exclusion feature. No clarify round was needed — the design fork was
+> surfaced during the spec-006 PR review discussion.
+
+- Q: The spec-006 single `LabelSelector` field ANDs all requirements and cannot
+  express OR across different label keys. How should multi-criteria exclusion
+  work?
+  → A: **Multiple selectors, ORed together.** Replace the singular
+  `spec.nodeSelector: Option<LabelSelector>` with
+  `spec.nodeSelectors: Option<Vec<LabelSelector>>` — a list of selectors where
+  a node is excluded if it matches ANY one of them. Each selector internally
+  ANDs its own matchLabels/matchExpressions (standard K8s semantics); the OR is
+  at the list level. This lets operators exclude control-plane nodes by role
+  AND experimental nodes by a custom label without applying a shared label.
+
+### Design consequences (carried into specify)
+
+- Since spec-006 was just merged with no production deployments, a clean field
+  rename (`nodeSelector` → `nodeSelectors`) is acceptable — no dual-field
+  backward compatibility shim is needed.
+- The `node_filter.rs` module is extended: `labels_match_selector` is reused
+  per-selector; a new `labels_match_any_selector` wrapper ORs the results.
+- A node matching multiple selectors is excluded once (no double-count in
+  `excludedBySelector`).
+- An invalid selector in the list is logged and skipped — the remaining
+  selectors still apply. All-invalid → unschedulable-only fallback (same as
+  spec-006 FR-010).
+- No new dependencies, no new RBAC.
