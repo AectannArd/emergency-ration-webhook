@@ -12,8 +12,10 @@
 //! | `capacity_admission_total_allocatable{resource}` | gauge | ClusterCapacity status |
 //! | `capacity_admission_current_allocation{resource}` | gauge | Allocation `allocated*` |
 //! | `capacity_admission_ceiling{resource}` | gauge | Allocation `ceiling*` |
+//! | `capacity_admission_exemptions_total{reason}` | counter | webhook handler (spec-008) |
 //!
-//! `resource` ∈ `{cpu, memory}`, `verdict` ∈ `{allow, deny, dry_run_deny, error}`.
+//! `resource` ∈ `{cpu, memory}`, `verdict` ∈ `{allow, deny, dry_run_deny, error}`,
+//! `reason` ∈ `{namespace, priority_class, webhook_namespace}`.
 
 use prometheus::{
     Encoder, GaugeVec, Histogram, HistogramOpts, IntCounterVec, IntGauge, IntGaugeVec, Opts,
@@ -85,6 +87,8 @@ pub struct Metrics {
     total_allocatable: IntGaugeVec,
     current_allocation: IntGaugeVec,
     ceiling: IntGaugeVec,
+    /// spec-008: pods admitted by exclusion policy, by reason.
+    exemptions: IntCounterVec,
 }
 
 impl Metrics {
@@ -145,6 +149,14 @@ impl Metrics {
             &["resource"],
         )
         .expect("ceiling gauge vec");
+        let exemptions = IntCounterVec::new(
+            Opts::new(
+                "capacity_admission_exemptions_total",
+                "Pods admitted by exclusion policy, by reason.",
+            ),
+            &["reason"],
+        )
+        .expect("exemptions counter");
 
         registry
             .register(Box::new(verdicts.clone()))
@@ -167,6 +179,9 @@ impl Metrics {
         registry
             .register(Box::new(ceiling.clone()))
             .expect("register ceiling");
+        registry
+            .register(Box::new(exemptions.clone()))
+            .expect("register exemptions");
 
         // CounterVec/GaugeVec emit nothing until a child label-set is created.
         // Pre-create every expected series so all seven metrics appear in
@@ -193,6 +208,12 @@ impl Metrics {
                 .set(0.0);
         }
 
+        // spec-008: pre-create every exemption `reason` series at zero so a
+        // scrape sees the full exemption surface before the first exempt decision.
+        for reason in ["namespace", "priority_class", "webhook_namespace"] {
+            exemptions.with_label_values(&[reason]);
+        }
+
         Self {
             registry,
             verdicts,
@@ -202,6 +223,7 @@ impl Metrics {
             total_allocatable,
             current_allocation,
             ceiling,
+            exemptions,
         }
     }
 
@@ -225,6 +247,13 @@ impl Metrics {
         self.verdicts
             .with_label_values(&[resource.as_str(), verdict.as_str()])
             .inc();
+    }
+
+    /// Increment the exemption counter for a reason (spec-008). Takes the label
+    /// value as `&str` (from [`ExemptionReason::as_str`](crate::crd::ExemptionReason::as_str))
+    /// so this module stays decoupled from `crate::crd`.
+    pub fn record_exemption(&self, reason: &str) {
+        self.exemptions.with_label_values(&[reason]).inc();
     }
 
     /// Record an admission decision latency observation (seconds).
@@ -268,7 +297,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_exposes_all_seven_metrics() {
+    fn render_exposes_all_metrics() {
         let metrics = Metrics::new();
         let text = metrics.render();
         for name in [
@@ -279,6 +308,7 @@ mod tests {
             "capacity_admission_total_allocatable",
             "capacity_admission_current_allocation",
             "capacity_admission_ceiling",
+            "capacity_admission_exemptions_total",
         ] {
             assert!(
                 text.contains(&format!("# HELP {name}"))
@@ -332,6 +362,56 @@ mod tests {
                 r#"capacity_admission_verdicts_total{resource="memory",verdict="dry_run_deny"} 0"#
             ),
             "memory dry_run_deny series must be pre-created at zero: {text}"
+        );
+    }
+
+    // ---- spec-008: capacity_admission_exemptions_total{reason} ----
+
+    #[test]
+    fn render_exposes_exemptions_counter() {
+        let metrics = Metrics::new();
+        let text = metrics.render();
+        for needle in [
+            "# HELP capacity_admission_exemptions_total",
+            "# TYPE capacity_admission_exemptions_total counter",
+        ] {
+            assert!(text.contains(needle), "missing {needle}: {text}");
+        }
+    }
+
+    #[test]
+    fn new_pre_creates_exemption_series_at_zero() {
+        // T004: all three reason labels are pre-created at zero at startup.
+        let metrics = Metrics::new();
+        let text = metrics.render();
+        for reason in ["namespace", "priority_class", "webhook_namespace"] {
+            assert!(
+                text.contains(&format!(
+                    r#"capacity_admission_exemptions_total{{reason="{reason}"}} 0"#
+                )),
+                "{reason} exemption series must be pre-created at zero: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn record_exemption_increments_only_that_reason() {
+        let metrics = Metrics::new();
+        metrics.record_exemption("namespace");
+        metrics.record_exemption("namespace");
+        metrics.record_exemption("priority_class");
+        let text = metrics.render();
+        assert!(
+            text.contains(r#"capacity_admission_exemptions_total{reason="namespace"} 2"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"capacity_admission_exemptions_total{reason="priority_class"} 1"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"capacity_admission_exemptions_total{reason="webhook_namespace"} 0"#),
+            "untouched reason stays at zero: {text}"
         );
     }
 
