@@ -113,6 +113,7 @@ fn state_with(allocation: Store<Allocation>) -> AppState {
         Arc::new(capacity_store()),
         Arc::new(move || now),
         Arc::new(Metrics::new()),
+        "capacity-admission".to_string(),
     )
 }
 

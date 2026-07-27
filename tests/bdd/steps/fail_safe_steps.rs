@@ -153,6 +153,7 @@ impl FailSafeWorld {
             Arc::new(self.capacity_store.clone()),
             Arc::new(move || now),
             Arc::new(Metrics::new()),
+            "capacity-admission".to_string(),
         );
         self.last = Some(handle(body, &state).await);
     }

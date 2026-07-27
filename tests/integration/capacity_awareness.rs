@@ -88,6 +88,7 @@ fn state(metrics: Arc<Metrics>) -> AppState {
         Arc::new(populated_capacity_store()),
         Arc::new(move || now),
         metrics,
+        "capacity-admission".to_string(),
     )
 }
 

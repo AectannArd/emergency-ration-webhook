@@ -151,6 +151,7 @@ impl DryRunWorld {
             Arc::new(self.capacity_store.clone()),
             Arc::new(fixed_now) as Clock,
             Arc::clone(&self.metrics),
+            "capacity-admission".to_string(),
         );
         self.last = Some(handle(body, &state).await);
     }

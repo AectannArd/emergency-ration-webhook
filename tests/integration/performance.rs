@@ -78,6 +78,7 @@ async fn admission_decision_meets_latency_targets() {
         Arc::new(capacity_store),
         Arc::new(move || now),
         Arc::new(Metrics::new()),
+        "capacity-admission".to_string(),
     );
 
     // A small pod (5 CPU / 40 GiB) that fits → admit each iteration.

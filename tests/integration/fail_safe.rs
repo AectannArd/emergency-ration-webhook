@@ -95,6 +95,7 @@ fn state(
         Arc::new(capacity),
         Arc::new(move || clock_now),
         Arc::new(Metrics::new()),
+        "capacity-admission".to_string(),
     )
 }
 
