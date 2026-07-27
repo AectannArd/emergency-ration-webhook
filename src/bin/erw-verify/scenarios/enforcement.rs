@@ -316,7 +316,7 @@ fn denial_message(err: &kube::Error) -> String {
 }
 
 /// Create a test pod with explicit resource requests in the default namespace.
-async fn create_pod(
+pub(super) async fn create_pod(
     client: &Client,
     name: &str,
     cpu: &str,
@@ -329,7 +329,7 @@ async fn create_pod(
 }
 
 /// Delete a test pod, treating a 404 (already gone) as success.
-async fn delete_pod(client: &Client, name: &str) -> Result<(), kube::Error> {
+pub(super) async fn delete_pod(client: &Client, name: &str) -> Result<(), kube::Error> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), POD_NAMESPACE);
     match pods.delete(name, &DeleteParams::default()).await {
         Ok(_) => Ok(()),

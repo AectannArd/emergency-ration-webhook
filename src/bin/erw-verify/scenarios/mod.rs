@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+pub mod degradation;
 pub mod enforcement;
 
 /// Outcome of a single verification scenario.
@@ -32,10 +33,6 @@ pub enum ScenarioGroup {
     /// User Story 1: enforcement scenarios (S1-S8).
     Enforcement,
     /// User Story 2: active degradation scenarios (S9-S11).
-    ///
-    /// Not constructed in this MVP slice (Phases 1-3); exercised by the Phase 4
-    /// degradation scenarios (US2). Allowed dead until then.
-    #[allow(dead_code)]
     Degradation,
 }
 

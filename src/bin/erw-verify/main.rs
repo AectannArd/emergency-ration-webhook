@@ -138,9 +138,11 @@ async fn run(config: &VerifyConfig) -> Result<ReportData, String> {
         }
         return Err(message);
     }
-    tracing::info!("setup complete; running enforcement scenarios");
+    tracing::info!("setup complete; running verification scenarios");
 
-    let results = scenarios::enforcement::run(&client).await;
+    let mut results = scenarios::enforcement::run(&client).await;
+    tracing::info!("enforcement scenarios complete; running degradation scenarios");
+    results.extend(scenarios::degradation::run(&client).await);
     let any_failed = results.iter().any(|r| r.status == ScenarioStatus::Fail);
 
     // Teardown unless the operator asked to keep the install for debugging AND a
