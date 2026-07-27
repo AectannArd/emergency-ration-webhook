@@ -31,18 +31,18 @@
 
 ### Tests for Foundational CRD Changes (TDD — write first, watch fail)
 
-- [ ] T001 [P] Write test: `ClusterCapacitySpec` with `node_selector: Option<LabelSelector>` field serialises camelCase as `nodeSelector` and round-trips through serde in `src/crd/cluster_capacity.rs` #[cfg(test)] module. Verify the test FAILS (field does not exist yet).
-- [ ] T002 [P] Write test: `ClusterCapacityStatus` with new fields `excluded_node_count`, `excluded_by_unschedulable`, `excluded_by_selector` serialise camelCase (`excludedNodeCount`, `excludedByUnschedulable`, `excludedBySelector`) and round-trip in `src/crd/cluster_capacity.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T003 [P] Write test: `ClusterCapacity::crd()` generated schema includes `nodeSelector` under `spec.properties` (using `serde_json::pointer` to traverse the CRD JSON) in `src/crd/cluster_capacity.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T004 [P] Write test: `default_capacity_singleton()` creates a `ClusterCapacitySpec { node_selector: None }` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL (struct literal mismatch — field doesn't exist yet).
+- [x] T001 [P] Write test: `ClusterCapacitySpec` with `node_selector: Option<LabelSelector>` field serialises camelCase as `nodeSelector` and round-trips through serde in `src/crd/cluster_capacity.rs` #[cfg(test)] module. Verify the test FAILS (field does not exist yet).
+- [x] T002 [P] Write test: `ClusterCapacityStatus` with new fields `excluded_node_count`, `excluded_by_unschedulable`, `excluded_by_selector` serialise camelCase (`excludedNodeCount`, `excludedByUnschedulable`, `excludedBySelector`) and round-trip in `src/crd/cluster_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T003 [P] Write test: `ClusterCapacity::crd()` generated schema includes `nodeSelector` under `spec.properties` (using `serde_json::pointer` to traverse the CRD JSON) in `src/crd/cluster_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T004 [P] Write test: `default_capacity_singleton()` creates a `ClusterCapacitySpec { node_selector: None }` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL (struct literal mismatch — field doesn't exist yet).
 
 ### Implementation for Foundational CRD Changes
 
-- [ ] T005 Add `pub node_selector: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector>` field to `ClusterCapacitySpec` in `src/crd/cluster_capacity.rs`. Add `use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;` import. This makes T001, T003, T004 pass (GREEN).
-- [ ] T006 Add `pub excluded_node_count: i32`, `pub excluded_by_unschedulable: i32`, `pub excluded_by_selector: i32` fields to `ClusterCapacityStatus` in `src/crd/cluster_capacity.rs`. This makes T002 pass (GREEN).
-- [ ] T007 [P] Update `default_capacity_singleton()` in `src/controllers/node_capacity.rs` to construct `ClusterCapacitySpec { node_selector: None }`. This makes T004 pass (GREEN).
-- [ ] T008 [P] Update existing test `status_serialises_camel_case()` in `src/crd/cluster_capacity.rs` to include the three new fields in the constructed status literal (mechanical update — the test currently constructs a status without these fields).
-- [ ] T009 Run `cargo test --lib crd::cluster_capacity` — all CRD tests pass (GREEN).
+- [x] T005 Add `pub node_selector: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector>` field to `ClusterCapacitySpec` in `src/crd/cluster_capacity.rs`. Add `use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;` import. This makes T001, T003, T004 pass (GREEN).
+- [x] T006 Add `pub excluded_node_count: i32`, `pub excluded_by_unschedulable: i32`, `pub excluded_by_selector: i32` fields to `ClusterCapacityStatus` in `src/crd/cluster_capacity.rs`. This makes T002 pass (GREEN).
+- [x] T007 [P] Update `default_capacity_singleton()` in `src/controllers/node_capacity.rs` to construct `ClusterCapacitySpec { node_selector: None }`. This makes T004 pass (GREEN).
+- [x] T008 [P] Update existing test `status_serialises_camel_case()` in `src/crd/cluster_capacity.rs` to include the three new fields in the constructed status literal (mechanical update — the test currently constructs a status without these fields).
+- [x] T009 Run `cargo test --lib crd::cluster_capacity` — all CRD tests pass (GREEN).
 
 **Checkpoint**: Foundation ready — CRD structs carry the new fields, all existing tests pass, user story implementation can begin.
 
@@ -56,19 +56,19 @@
 
 ### Tests for User Story 1 (TDD — write first, watch fail)
 
-- [ ] T010 [P] [US1] Write test: `is_node_counted(unschedulable=true, labels=None, selector=None)` returns `false` (FR-001) in `src/controllers/node_filter.rs` #[cfg(test)]. Verify the module doesn't exist yet — test fails to compile.
-- [ ] T011 [P] [US1] Write test: `is_node_counted(unschedulable=false, labels=None, selector=None)` returns `true` (FR-002) in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T012 [P] [US1] Write test: `sum_node_allocatable` with 3 nodes where 1 is `unschedulable=true` returns `(cpu_of_2, mem_of_2, 2)` and `ExclusionBreakdown { counted: 2, excluded_unschedulable: 1, excluded_by_selector: 0 }` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL (signature changed, new return type).
-- [ ] T013 [P] [US1] Write test: `sum_node_allocatable` where ALL nodes are unschedulable returns `(0, 0, 0, breakdown)` — zero capacity (Principle I interaction) in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T010 [P] [US1] Write test: `is_node_counted(unschedulable=true, labels=None, selector=None)` returns `false` (FR-001) in `src/controllers/node_filter.rs` #[cfg(test)]. Verify the module doesn't exist yet — test fails to compile.
+- [x] T011 [P] [US1] Write test: `is_node_counted(unschedulable=false, labels=None, selector=None)` returns `true` (FR-002) in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
+- [x] T012 [P] [US1] Write test: `sum_node_allocatable` with 3 nodes where 1 is `unschedulable=true` returns `(cpu_of_2, mem_of_2, 2)` and `ExclusionBreakdown { counted: 2, excluded_unschedulable: 1, excluded_by_selector: 0 }` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL (signature changed, new return type).
+- [x] T013 [P] [US1] Write test: `sum_node_allocatable` where ALL nodes are unschedulable returns `(0, 0, 0, breakdown)` — zero capacity (Principle I interaction) in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Create `src/controllers/node_filter.rs` with: `pub fn is_node_counted(unschedulable: bool, labels: Option<&BTreeMap<String, String>>, selector: Option<&LabelSelector>) -> bool`, `pub struct ExclusionBreakdown { counted: i32, excluded_unschedulable: i32, excluded_by_selector: i32 }` (with `#[derive(Debug, Clone, Default, PartialEq, Eq)]`), and `pub mod node_filter;` declaration in `src/controllers/mod.rs`. Implement `is_node_counted` with only the unschedulable check for now (return `false` if `unschedulable == true`, `true` otherwise — selector logic added in US2). This makes T010, T011 pass (GREEN).
-- [ ] T015 [US1] Modify `sum_node_allocatable` signature in `src/controllers/node_capacity.rs` to accept `selector: Option<&LabelSelector>` as a second parameter and return `(i64, i64, i32, ExclusionBreakdown)`. Add the unschedulable check inside the loop: skip nodes where `node.spec.unschedulable == Some(true)`, incrementing `breakdown.excluded_unschedulable`. Import `ExclusionBreakdown` and `is_node_counted` from `node_filter`. This makes T012, T013 pass (GREEN).
-- [ ] T016 [US1] Update `reconcile_now()` and the watcher `for_each` closure in `src/controllers/node_capacity.rs` to call `sum_node_allocatable(snapshot, selector)` with `selector=None` (the selector wiring comes in US2; for now pass `None` to exercise the unschedulable path). Extract `ExclusionBreakdown` from the return and pass the three new fields to `patch_status`.
-- [ ] T017 [US1] Modify `patch_status()` and `patch_once()` in `src/controllers/node_capacity.rs` to accept the three new exclusion-count parameters (`excluded_node_count`, `excluded_by_unschedulable`, `excluded_by_selector`) and write them into the `ClusterCapacityStatus` struct.
-- [ ] T018 [US1] Update the existing mock-apiserver integration test `reconcile_now_lists_nodes_then_patches_status` in `src/controllers/node_capacity.rs` #[cfg(test)] to assert the new status fields (`excludedNodeCount`, `excludedByUnschedulable`) are present in the PATCH body (value `0` since the mock node is not unschedulable). Mechanical update — add assertions, don't change the test scenario.
-- [ ] T019 [US1] Run `cargo test --lib controllers::node_capacity controllers::node_filter` — all tests pass (GREEN).
+- [x] T014 [US1] Create `src/controllers/node_filter.rs` with: `pub fn is_node_counted(unschedulable: bool, labels: Option<&BTreeMap<String, String>>, selector: Option<&LabelSelector>) -> bool`, `pub struct ExclusionBreakdown { counted: i32, excluded_unschedulable: i32, excluded_by_selector: i32 }` (with `#[derive(Debug, Clone, Default, PartialEq, Eq)]`), and `pub mod node_filter;` declaration in `src/controllers/mod.rs`. Implement `is_node_counted` with only the unschedulable check for now (return `false` if `unschedulable == true`, `true` otherwise — selector logic added in US2). This makes T010, T011 pass (GREEN).
+- [x] T015 [US1] Modify `sum_node_allocatable` signature in `src/controllers/node_capacity.rs` to accept `selector: Option<&LabelSelector>` as a second parameter and return `(i64, i64, i32, ExclusionBreakdown)`. Add the unschedulable check inside the loop: skip nodes where `node.spec.unschedulable == Some(true)`, incrementing `breakdown.excluded_unschedulable`. Import `ExclusionBreakdown` and `is_node_counted` from `node_filter`. This makes T012, T013 pass (GREEN).
+- [x] T016 [US1] Update `reconcile_now()` and the watcher `for_each` closure in `src/controllers/node_capacity.rs` to call `sum_node_allocatable(snapshot, selector)` with `selector=None` (the selector wiring comes in US2; for now pass `None` to exercise the unschedulable path). Extract `ExclusionBreakdown` from the return and pass the three new fields to `patch_status`.
+- [x] T017 [US1] Modify `patch_status()` and `patch_once()` in `src/controllers/node_capacity.rs` to accept the three new exclusion-count parameters (`excluded_node_count`, `excluded_by_unschedulable`, `excluded_by_selector`) and write them into the `ClusterCapacityStatus` struct.
+- [x] T018 [US1] Update the existing mock-apiserver integration test `reconcile_now_lists_nodes_then_patches_status` in `src/controllers/node_capacity.rs` #[cfg(test)] to assert the new status fields (`excludedNodeCount`, `excludedByUnschedulable`) are present in the PATCH body (value `0` since the mock node is not unschedulable). Mechanical update — add assertions, don't change the test scenario.
+- [x] T019 [US1] Run `cargo test --lib controllers::node_capacity controllers::node_filter` — all tests pass (GREEN).
 
 **Checkpoint**: User Story 1 fully functional and testable. Cordoned nodes are excluded by default. The capacity pool is now accurate.
 
@@ -82,23 +82,23 @@
 
 ### Tests for User Story 2 (TDD — write first, watch fail)
 
-- [ ] T020 [P] [US2] Write test: `labels_match_selector` with `matchLabels` that match node labels returns `true`; mismatched returns `false` in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL (function doesn't exist).
-- [ ] T021 [P] [US2] Write test: `labels_match_selector` with `matchExpressions` operator `In` — node label value in values returns `true`, not in returns `false` in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T022 [P] [US2] Write test: `labels_match_selector` with operators `NotIn`, `Exists`, `DoesNotExist` — each evaluated correctly in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T023 [P] [US2] Write test: `labels_match_selector` with an empty selector (no `matchLabels`, no `matchExpressions`) returns `true` (matches all — K8s convention, FR-005) in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T024 [P] [US2] Write test: `is_node_counted` with `selector=Some(matching_selector)` returns `false` (FR-003); with `selector=Some(non_matching)` returns `true` in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T025 [P] [US2] Write test: `validate_selector` returns `Ok(())` for valid selectors, `Err(SelectorError::UnknownOperator)` for bad operator, `Err(SelectorError::MissingValues)` for `In` without values in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T026 [P] [US2] Write test: `sum_node_allocatable` with 3 nodes (2 workers + 1 control-plane with label `node-role.kubernetes.io/control-plane`) and selector matching that label returns `(cpu_of_2, mem_of_2, 2)` and `ExclusionBreakdown { counted: 2, excluded_unschedulable: 0, excluded_by_selector: 1 }` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T027 [P] [US2] Write test: `sum_node_allocatable` with an invalid selector (e.g. operator `"Matches"`) falls back to unschedulable-only exclusion — logs warning, no selector-based exclusion (FR-010) in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T020 [P] [US2] Write test: `labels_match_selector` with `matchLabels` that match node labels returns `true`; mismatched returns `false` in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL (function doesn't exist).
+- [x] T021 [P] [US2] Write test: `labels_match_selector` with `matchExpressions` operator `In` — node label value in values returns `true`, not in returns `false` in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
+- [x] T022 [P] [US2] Write test: `labels_match_selector` with operators `NotIn`, `Exists`, `DoesNotExist` — each evaluated correctly in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
+- [x] T023 [P] [US2] Write test: `labels_match_selector` with an empty selector (no `matchLabels`, no `matchExpressions`) returns `true` (matches all — K8s convention, FR-005) in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
+- [x] T024 [P] [US2] Write test: `is_node_counted` with `selector=Some(matching_selector)` returns `false` (FR-003); with `selector=Some(non_matching)` returns `true` in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
+- [x] T025 [P] [US2] Write test: `validate_selector` returns `Ok(())` for valid selectors, `Err(SelectorError::UnknownOperator)` for bad operator, `Err(SelectorError::MissingValues)` for `In` without values in `src/controllers/node_filter.rs` #[cfg(test)]. Verify FAIL.
+- [x] T026 [P] [US2] Write test: `sum_node_allocatable` with 3 nodes (2 workers + 1 control-plane with label `node-role.kubernetes.io/control-plane`) and selector matching that label returns `(cpu_of_2, mem_of_2, 2)` and `ExclusionBreakdown { counted: 2, excluded_unschedulable: 0, excluded_by_selector: 1 }` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T027 [P] [US2] Write test: `sum_node_allocatable` with an invalid selector (e.g. operator `"Matches"`) falls back to unschedulable-only exclusion — logs warning, no selector-based exclusion (FR-010) in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
 
 ### Implementation for User Story 2
 
-- [ ] T028 [US2] Implement `fn labels_match_selector(labels: &BTreeMap<String, String>, selector: &LabelSelector) -> bool` in `src/controllers/node_filter.rs`. Iterate `matchLabels` (all must match) and `matchExpressions` (each evaluated by operator: `In`, `NotIn`, `Exists`, `DoesNotExist`), AND the results. Empty selector returns `true`. This makes T020–T023 pass (GREEN).
-- [ ] T029 [US2] Implement `pub fn validate_selector(selector: &LabelSelector) -> Result<(), SelectorError>` and `pub enum SelectorError` with variants `UnknownOperator`, `MissingValues`, `UnexpectedValues` (derive `thiserror::Error`) in `src/controllers/node_filter.rs`. Check operator validity and value-presence rules per research R4. This makes T025 pass (GREEN).
-- [ ] T030 [US2] Extend `is_node_counted` in `src/controllers/node_filter.rs` with the selector path: after the unschedulable check, if `selector` is `Some(sel)` and `validate_selector(sel).is_ok()` and `labels_match_selector(labels, sel)` returns `true`, return `false`. This makes T024 pass (GREEN).
-- [ ] T031 [US2] Wire the selector into `sum_node_allocatable` in `src/controllers/node_capacity.rs`: inside the node loop, after the unschedulable check, call `is_node_counted` for the selector path. If `validate_selector` returns `Err`, log `warn!` and skip selector matching for this cycle (fallback). Track `excluded_by_selector` in the breakdown. This makes T026, T027 pass (GREEN).
-- [ ] T032 [US2] Wire the selector read in the controller: in `reconcile_now()` and the watcher `for_each` closure in `src/controllers/node_capacity.rs`, read `node_selector` from the `ClusterCapacity` CRD spec (via the reflector cache or a `capacity_api.get()` call). Pass `spec.node_selector.as_ref()` to `sum_node_allocatable`. This implements FR-007/FR-011 (runtime-configurable selector).
-- [ ] T033 [US2] Run `cargo test --lib controllers::node_filter controllers::node_capacity` — all tests pass (GREEN).
+- [x] T028 [US2] Implement `fn labels_match_selector(labels: &BTreeMap<String, String>, selector: &LabelSelector) -> bool` in `src/controllers/node_filter.rs`. Iterate `matchLabels` (all must match) and `matchExpressions` (each evaluated by operator: `In`, `NotIn`, `Exists`, `DoesNotExist`), AND the results. Empty selector returns `true`. This makes T020–T023 pass (GREEN).
+- [x] T029 [US2] Implement `pub fn validate_selector(selector: &LabelSelector) -> Result<(), SelectorError>` and `pub enum SelectorError` with variants `UnknownOperator`, `MissingValues`, `UnexpectedValues` (derive `thiserror::Error`) in `src/controllers/node_filter.rs`. Check operator validity and value-presence rules per research R4. This makes T025 pass (GREEN).
+- [x] T030 [US2] Extend `is_node_counted` in `src/controllers/node_filter.rs` with the selector path: after the unschedulable check, if `selector` is `Some(sel)` and `validate_selector(sel).is_ok()` and `labels_match_selector(labels, sel)` returns `true`, return `false`. This makes T024 pass (GREEN).
+- [x] T031 [US2] Wire the selector into `sum_node_allocatable` in `src/controllers/node_capacity.rs`: inside the node loop, after the unschedulable check, call `is_node_counted` for the selector path. If `validate_selector` returns `Err`, log `warn!` and skip selector matching for this cycle (fallback). Track `excluded_by_selector` in the breakdown. This makes T026, T027 pass (GREEN).
+- [x] T032 [US2] Wire the selector read in the controller: in `reconcile_now()` and the watcher `for_each` closure in `src/controllers/node_capacity.rs`, read `node_selector` from the `ClusterCapacity` CRD spec (via the reflector cache or a `capacity_api.get()` call). Pass `spec.node_selector.as_ref()` to `sum_node_allocatable`. This implements FR-007/FR-011 (runtime-configurable selector).
+- [x] T033 [US2] Run `cargo test --lib controllers::node_filter controllers::node_capacity` — all tests pass (GREEN).
 
 **Checkpoint**: User Stories 1 AND 2 both work. Cordoned nodes excluded by default; control-plane nodes excludable via label selector.
 
@@ -112,13 +112,13 @@
 
 ### Tests for User Story 3 (TDD — write first, watch fail)
 
-- [ ] T034 [P] [US3] Write test: `sum_node_allocatable` with 5 nodes (1 unschedulable, 1 selector-matched, 3 counted) returns `ExclusionBreakdown { counted: 3, excluded_unschedulable: 1, excluded_by_selector: 1 }` and `excluded_node_count == 2` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
-- [ ] T035 [P] [US3] Write test: node that is BOTH unschedulable AND selector-matched is counted under `excluded_unschedulable` only (not double-counted) in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T034 [P] [US3] Write test: `sum_node_allocatable` with 5 nodes (1 unschedulable, 1 selector-matched, 3 counted) returns `ExclusionBreakdown { counted: 3, excluded_unschedulable: 1, excluded_by_selector: 1 }` and `excluded_node_count == 2` in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
+- [x] T035 [P] [US3] Write test: node that is BOTH unschedulable AND selector-matched is counted under `excluded_unschedulable` only (not double-counted) in `src/controllers/node_capacity.rs` #[cfg(test)]. Verify FAIL.
 
 ### Implementation for User Story 3
 
-- [ ] T036 [US3] Verify the `ExclusionBreakdown.excluded_node_count` computed in `sum_node_allocatable` equals `excluded_unschedulable + excluded_by_selector` and is passed correctly to `patch_status`. This is mostly a verification task — the breakdown logic was implemented in T015/T031. Fix the counting order if T034/T035 reveal a double-count bug (unschedulable check must come before selector check). This makes T034, T035 pass (GREEN).
-- [ ] T037 [US3] Run `cargo test --lib controllers::node_capacity` — all observability tests pass (GREEN).
+- [x] T036 [US3] Verify the `ExclusionBreakdown.excluded_node_count` computed in `sum_node_allocatable` equals `excluded_unschedulable + excluded_by_selector` and is passed correctly to `patch_status`. This is mostly a verification task — the breakdown logic was implemented in T015/T031. Fix the counting order if T034/T035 reveal a double-count bug (unschedulable check must come before selector check). This makes T034, T035 pass (GREEN).
+- [x] T037 [US3] Run `cargo test --lib controllers::node_capacity` — all observability tests pass (GREEN).
 
 **Checkpoint**: All three user stories are functional and independently testable.
 
@@ -130,17 +130,17 @@
 
 ### Integration Tests (mock apiserver via tower-test)
 
-- [ ] T038 [P] Write integration test: cordon event updates capacity status — mock apiserver serves a node list with one `unschedulable: true` node; controller reconciles; assert status PATCH has `nodeCount` excluding the cordoned node and `excludedByUnschedulable: 1` in `tests/integration/node_filter.rs`. Verify FAIL.
-- [ ] T039 [P] Write integration test: label-selector change updates capacity — mock apiserver serves nodes with labels; `ClusterCapacity` spec has `nodeSelector`; controller reconciles; assert status excludes matching nodes in `tests/integration/node_filter.rs`. Verify FAIL.
-- [ ] T040 Implement the integration test scenarios from T038/T039 in `tests/integration/node_filter.rs` using the existing `tower-test` mock apiserver pattern (see `tests/integration/capacity_awareness.rs` for the established pattern). This makes T038, T039 pass (GREEN).
-- [ ] T041 Add `[[test]] name = "node_filter" path = "tests/integration/node_filter.rs"` to `Cargo.toml`.
+- [x] T038 [P] Write integration test: cordon event updates capacity status — mock apiserver serves a node list with one `unschedulable: true` node; controller reconciles; assert status PATCH has `nodeCount` excluding the cordoned node and `excludedByUnschedulable: 1` in `tests/integration/node_filter.rs`. Verify FAIL.
+- [x] T039 [P] Write integration test: label-selector change updates capacity — mock apiserver serves nodes with labels; `ClusterCapacity` spec has `nodeSelector`; controller reconciles; assert status excludes matching nodes in `tests/integration/node_filter.rs`. Verify FAIL.
+- [x] T040 Implement the integration test scenarios from T038/T039 in `tests/integration/node_filter.rs` using the existing `tower-test` mock apiserver pattern (see `tests/integration/capacity_awareness.rs` for the established pattern). This makes T038, T039 pass (GREEN).
+- [x] T041 Add `[[test]] name = "node_filter" path = "tests/integration/node_filter.rs"` to `Cargo.toml`.
 
 ### BDD Tests (cucumber-rs)
 
-- [ ] T042 [P] Write BDD feature file: `@cordon` scenario (cordoned node excluded), `@selector` scenario (control-plane excluded by label), `@observability` scenario (status shows breakdown) in `tests/bdd/features/node_filter.feature`. Follow the Gherkin style of existing `.feature` files.
-- [ ] T043 [P] Write BDD step definitions in `tests/bdd/steps/node_filter_steps.rs` implementing the Given/When/Then steps from T042, using the `World` struct pattern from `tests/bdd/steps/capacity_steps.rs`.
-- [ ] T044 Add `[[test]] name = "node_filter_bdd" path = "tests/bdd/steps/node_filter_steps.rs" harness = false` to `Cargo.toml`.
-- [ ] T045 Run `cargo test --test node_filter --test node_filter_bdd` — all integration and BDD tests pass (GREEN).
+- [x] T042 [P] Write BDD feature file: `@cordon` scenario (cordoned node excluded), `@selector` scenario (control-plane excluded by label), `@observability` scenario (status shows breakdown) in `tests/bdd/features/node_filter.feature`. Follow the Gherkin style of existing `.feature` files.
+- [x] T043 [P] Write BDD step definitions in `tests/bdd/steps/node_filter_steps.rs` implementing the Given/When/Then steps from T042, using the `World` struct pattern from `tests/bdd/steps/capacity_steps.rs`.
+- [x] T044 Add `[[test]] name = "node_filter_bdd" path = "tests/bdd/steps/node_filter_steps.rs" harness = false` to `Cargo.toml`.
+- [x] T045 Run `cargo test --test node_filter --test node_filter_bdd` — all integration and BDD tests pass (GREEN).
 
 **Checkpoint**: Feature is covered by integration and BDD tests.
 
@@ -150,9 +150,9 @@
 
 **Purpose**: Update the CRD manifest and user-facing documentation.
 
-- [ ] T046 Update `deploy/crds.yaml`: add `nodeSelector` (with `matchLabels` + `matchExpressions` sub-properties) under the `ClusterCapacity` spec schema; add `excludedNodeCount`, `excludedByUnschedulable`, `excludedBySelector` integer fields under the status schema. Match the schema in `data-model.md` §1.3.
-- [ ] T047 [P] Update `README.md`: add a "Node Exclusion" section documenting (a) default unschedulable exclusion, (b) `nodeSelector` label-selector configuration with `kubectl patch` examples, (c) the new status observability fields. Include the control-plane exclusion example from `contracts/clustercapacity-crd.md`. Required by FR-012 / Constitution Principle X.
-- [ ] T048 [P] Update `specs/001-capacity-admission-webhook/contracts/clustercapacity-crd.md` (the base contract) with a note pointing to the spec-006 delta for `nodeSelector` and the new status fields. Cross-reference, don't duplicate.
+- [x] T046 Update `deploy/crds.yaml`: add `nodeSelector` (with `matchLabels` + `matchExpressions` sub-properties) under the `ClusterCapacity` spec schema; add `excludedNodeCount`, `excludedByUnschedulable`, `excludedBySelector` integer fields under the status schema. Match the schema in `data-model.md` §1.3.
+- [x] T047 [P] Update `README.md`: add a "Node Exclusion" section documenting (a) default unschedulable exclusion, (b) `nodeSelector` label-selector configuration with `kubectl patch` examples, (c) the new status observability fields. Include the control-plane exclusion example from `contracts/clustercapacity-crd.md`. Required by FR-012 / Constitution Principle X.
+- [x] T048 [P] Update `specs/001-capacity-admission-webhook/contracts/clustercapacity-crd.md` (the base contract) with a note pointing to the spec-006 delta for `nodeSelector` and the new status fields. Cross-reference, don't duplicate.
 
 **Checkpoint**: Manifests and docs match the implementation.
 
@@ -162,12 +162,12 @@
 
 **Purpose**: Full CI gate — all jobs must pass.
 
-- [ ] T049 Run `cargo fmt --check` — fix any formatting issues.
-- [ ] T050 Run `cargo clippy -- -D warnings` — fix any lint issues.
-- [ ] T051 Run `cargo test --all-targets` — all unit + integration + BDD tests pass.
-- [ ] T052 Run the quickstart validation scenarios from `specs/006-schedulable-node-filter/quickstart.md` — verify each test command produces the expected results.
-- [ ] T053 Verify existing E2E CI (k8s 1.34/1.35/1.36) still passes with the updated CRD manifest. The CRD change is additive so no E2E workflow changes are needed.
-- [ ] T054 Final review: confirm all FR-001 through FR-012 are covered by tests or implementation, and the Constitution Check in `plan.md` still holds.
+- [x] T049 Run `cargo fmt --check` — fix any formatting issues.
+- [x] T050 Run `cargo clippy -- -D warnings` — fix any lint issues.
+- [x] T051 Run `cargo test --all-targets` — all unit + integration + BDD tests pass.
+- [x] T052 Run the quickstart validation scenarios from `specs/006-schedulable-node-filter/quickstart.md` — verify each test command produces the expected results.
+- [x] T053 Verify existing E2E CI (k8s 1.34/1.35/1.36) still passes with the updated CRD manifest. The CRD change is additive so no E2E workflow changes are needed.
+- [x] T054 Final review: confirm all FR-001 through FR-012 are covered by tests or implementation, and the Constitution Check in `plan.md` still holds.
 
 **Checkpoint**: CI green, feature complete.
 
