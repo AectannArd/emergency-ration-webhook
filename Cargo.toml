@@ -10,6 +10,13 @@ license = "Apache-2.0"
 name = "capacity-admission-webhook"
 path = "src/main.rs"
 
+# On-demand infrastructure verification tool (spec-005). Auto-discovers
+# `src/bin/erw-verify/main.rs`. A second binary keeps rcgen + serde_yaml out of
+# the webhook's production dependency tree (Constitution Principle V).
+[[bin]]
+name = "erw-verify"
+path = "src/bin/erw-verify/main.rs"
+
 [lib]
 name = "capacity_admission_webhook"
 path = "src/lib.rs"
@@ -56,6 +63,18 @@ name = "dry_run_bdd"
 path = "tests/bdd/steps/dry_run_steps.rs"
 harness = false
 
+# spec-005: unit tests for the verify tool's pure modules (report rendering,
+# exit-code derivation, CLI arg parsing). They `#[path]`-include the binary's
+# source files so the pure logic stays under `src/bin/erw-verify/` (Principle V)
+# while remaining unit-testable without a cluster (Principle VIII).
+[[test]]
+name = "verify_report"
+path = "tests/verify/report.rs"
+
+[[test]]
+name = "verify_args"
+path = "tests/verify/args.rs"
+
 [dependencies]
 # Kubernetes client, watcher/reflector/Controller runtime, CRD derive macro.
 # `admission` brings in the AdmissionReview/AdmissionResponse types
@@ -89,6 +108,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 prometheus = "0.14"
 # Ergonomic error enums.
 thiserror = "2"
+# spec-005 (erw-verify only): pure-Rust self-signed TLS certificate generation —
+# no OpenSSL dependency (research R3). Used by setup.rs to build the webhook's
+# serving cert + the webhook-config caBundle in-process.
+rcgen = "0.13"
+# spec-005 (erw-verify only): multi-document YAML manifest parsing for the
+# embedded `deploy/*.yaml` files (research R2). serde_json alone cannot split a
+# `---`-delimited manifest stream.
+serde_yaml = "0.9"
+# spec-005 (erw-verify only): base64-encode the serving cert into the TLS Secret
+# and the webhook-config caBundle. (Already a transitive dep; pinned explicitly.)
+base64 = "0.22"
+# spec-005 (erw-verify only): raw `http::Request` for the metrics/healthz API-proxy
+# GETs (research R8/R10). Already a transitive dep of kube; pinned explicitly so the
+# verify binary can name it without pulling a new download.
+http = "1"
 
 [dev-dependencies]
 # Mocked apiserver as a tower::Service for integration tests.

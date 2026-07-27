@@ -580,6 +580,100 @@ this is the operator-facing summary.
   (no network on the hot path) and admits or denies pod `CREATE`/`UPDATE` against
   the budget.
 
+## On-Demand Verification (`erw-verify`)
+
+`erw-verify` is a second binary in this crate — an operator-facing tool that
+installs the full webhook stack against a **clean, throwaway** Kubernetes cluster,
+runs an enforcement verification matrix, tears down everything it installed, and
+prints a human-readable or JSON report. It is the integration-test harness for the
+admission guarantee: point it at a disposable cluster and it proves the webhook
+admits/denies correctly on real infrastructure. It is **not** deployed into the
+cluster — only the webhook Deployment is (via the applied manifests).
+
+> **Throwaway cluster only.** The tool actively mutates the installation — it
+> patches the budget to `0`/`100`, flips enforcement mode to `dry-run`, and (in a
+> later phase) kills webhook pods and deletes CRDs. A pre-flight check refuses to
+> run if the `default` namespace contains any pods. Only run it against a cluster
+> you are willing to throw away.
+
+### Build
+
+```sh
+cargo build --bin erw-verify --release   # binary at target/release/erw-verify
+```
+
+The binary embeds the `deploy/*.yaml` manifests at compile time via `include_str!`,
+so it applies the exact manifests from the repository — no external files at
+runtime. The target cluster must be able to pull the webhook image
+(`capacity-admission-webhook:latest` by default); for a `kind` cluster, build and
+load it first:
+
+```sh
+docker build -t capacity-admission-webhook:latest .
+kind load docker-image capacity-admission-webhook:latest --name <your-cluster>
+```
+
+For a remote registry, point `deploy/deployment.yaml` at your image and rebuild
+`erw-verify` before running.
+
+### Usage
+
+```sh
+# Human-readable report (default): coloured per-scenario output + summary.
+./target/release/erw-verify --kubeconfig ~/.kube/config
+
+# Machine-readable JSON for CI / automation.
+./target/release/erw-verify --kubeconfig ~/.kube/config --json > report.json
+echo $?   # 0 = all passed, 1 = a scenario failed
+
+# Leave the installation in place for debugging when a scenario fails.
+./target/release/erw-verify --kubeconfig ~/.kube/config --keep-on-failure
+```
+
+### CLI Flags
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--kubeconfig <path>` | `KUBECONFIG` | inferred | Path to the kubeconfig for the target cluster. Precedence: flag → `KUBECONFIG` → `Config::infer` (`~/.kube/config`, then in-cluster). |
+| `--json` | — | off | Emit the report as machine-readable JSON instead of coloured terminal text. |
+| `--keep-on-failure` | — | off | Skip teardown if a scenario fails, leaving the installation in place for debugging. Without it, teardown always runs — even on failure. |
+| `--timeout-secs <N>` | `VERIFY_TIMEOUT_SECS` | `120` | Timeout (seconds) for setup readiness waits (pods Ready + capacity state populated). Must be > 0. |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | All scenarios passed and teardown succeeded. |
+| `1` | One or more scenarios failed (teardown still attempted unless `--keep-on-failure`). |
+| `2` | Setup error: cluster unreachable, pre-flight check failed (cluster not empty), manifests failed to apply, or readiness timed out. Scenarios do not run. |
+| `3` | Teardown partial failure: scenarios may have passed, but the cluster was not fully cleaned up — inspect manually. |
+
+When multiple conditions apply, the most severe wins (setup `2` > scenario `1` >
+teardown `3`). Errors are printed to **stderr** with an `ERROR:` prefix,
+independent of `--json`; the JSON report is only emitted once the tool reaches the
+report phase.
+
+### Scenario Inventory
+
+The tool runs a fixed set of enforcement scenarios. Each prints a ✓/✗/○ block with
+timing and a detail line; the report ends with a summary and the exit code.
+
+| ID | Scenario | Asserts |
+|----|----------|---------|
+| S1 | within-budget pod admitted | a small pod is admitted |
+| S2 | over-budget pod denied | a huge pod is rejected with HTTP 403 |
+| S3 | budgetPercent 0 (circuit-breaker) | a zero budget denies every non-zero request |
+| S4 | budgetPercent 100 (physical guard) | only genuine over-physical-commit is denied |
+| S5 | runtime budget adjustment | a budget patch takes effect with no webhook restart |
+| S6 | dry-run mode | an over-budget pod is admitted and the `dry_run_deny` counter increments |
+| S7 | capacity tracking accuracy | ClusterCapacity status matches an independent node sum |
+| S8 | metrics + health endpoints | `/healthz` and `/metrics` respond via the API proxy |
+
+Three degradation scenarios (S9-S11 — kill webhook pods, delete CRD instances,
+induce stale capacity data) are planned for a follow-up phase (US2); see
+[`specs/005-on-demand-verification/`](./specs/005-on-demand-verification/) and the
+[quickstart](./specs/005-on-demand-verification/quickstart.md) for the full design.
+
 ## Development
 
 ### Build
@@ -594,13 +688,16 @@ The MSRV is **1.89** (edition 2024), recorded in [`Cargo.toml`](./Cargo.toml).
 ### Tests
 
 ```sh
-cargo test                            # unit + integration + BDD (mocked apiserver)
+cargo test                            # unit + integration + BDD + verify (mocked apiserver)
 cargo test -- --ignored               # end-to-end tests (need a live k3d/kind cluster)
 ```
 
 Unit and integration tests use a `tower-test`-mocked API server; BDD scenarios
-run via `cucumber-rs` under `tests/bdd/`. E2E tests are marked `#[ignore]` so a
-plain `cargo test` does not require a cluster.
+run via `cucumber-rs` under `tests/bdd/`. The `erw-verify` tool's pure modules
+(report rendering, CLI arg parsing) have unit tests under `tests/verify/` that run
+with no cluster. E2E tests are marked `#[ignore]` so a plain `cargo test` does not
+require a cluster; `erw-verify`'s scenarios are themselves integration tests that
+run against a real cluster (see [On-Demand Verification](#on-demand-verification-erw-verify)).
 
 ### Quality Gate
 
@@ -637,8 +734,16 @@ src/
     ├── handler.rs           # axum routes (/validate, /metrics, /healthz), decision orchestration, logging
     ├── admission.rs         # pure budget check (inclusive ceiling)
     └── error.rs             # fail-closed error → AdmissionResponse mapping, rejection messages
+src/bin/erw-verify/          # on-demand verification tool (spec-005): separate binary
+├── main.rs                  # orchestration + exit codes
+├── args.rs                  # CLI flag / env-var parsing
+├── client.rs                # kube::Client from kubeconfig
+├── setup.rs                 # apply manifests, self-signed TLS cert (rcgen), caBundle, readiness, pre-flight
+├── teardown.rs              # reverse-order deletion
+├── report.rs                # pure human/JSON report rendering
+└── scenarios/               # enforcement scenarios S1-S8 (degradation S9-S11, later)
 deploy/                      # Kubernetes manifests (crds, rbac, deployment, webhook-config, cert-setup)
-tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs .feature)
+tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs) + verify (unit)
 ```
 
 ## License
