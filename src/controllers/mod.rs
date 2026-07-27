@@ -4,9 +4,11 @@ use serde::Serialize;
 
 pub mod allocation;
 pub mod node_capacity;
+pub mod node_filter;
 
 pub use allocation::{build_allocation_status, is_non_terminal, sum_pod_allocation};
 pub use node_capacity::sum_node_allocatable;
+pub use node_filter::{ExclusionBreakdown, is_node_counted};
 
 /// Wrap a status value in the `{"status": ...}` envelope a `/status`-subresource
 /// merge patch requires.

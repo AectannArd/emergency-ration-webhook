@@ -94,12 +94,15 @@ impl FailSafeWorld {
 
         // ClusterCapacity cache (unless the scenario removes it).
         if !matches!(self.failure, Failure::NoCapacity) {
-            let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
+            let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
             c.status = Some(ClusterCapacityStatus {
                 total_allocatable_cpu_milli: self.total_cpu_milli,
                 total_allocatable_memory_bytes: self.total_mem_bytes,
                 node_count: 2,
                 last_updated: rfc3339_from_unix(now),
+                excluded_node_count: 0,
+                excluded_by_unschedulable: 0,
+                excluded_by_selector: 0,
             });
             self.capacity_writer
                 .apply_watcher_event(&watcher::Event::Apply(c));

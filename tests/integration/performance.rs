@@ -53,12 +53,15 @@ async fn admission_decision_meets_latency_targets() {
     alloc_writer.apply_watcher_event(&watcher::Event::Apply(allocation));
 
     let (capacity_store, mut cap_writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-    let mut capacity = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
+    let mut capacity = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
     capacity.status = Some(ClusterCapacityStatus {
         total_allocatable_cpu_milli: 100_000,
         total_allocatable_memory_bytes: 200 * GIB,
         node_count: 2,
         last_updated: FIXTURE_TIME.to_string(),
+        excluded_node_count: 0,
+        excluded_by_unschedulable: 0,
+        excluded_by_selector: 0,
     });
     cap_writer.apply_watcher_event(&watcher::Event::Apply(capacity));
 

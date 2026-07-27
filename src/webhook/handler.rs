@@ -1034,12 +1034,15 @@ mod tests {
     fn populated_capacity_store() -> Store<ClusterCapacity> {
         use crate::crd::{ClusterCapacity, ClusterCapacitySpec, ClusterCapacityStatus};
         let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-        let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
+        let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
         c.status = Some(ClusterCapacityStatus {
             total_allocatable_cpu_milli: 100_000,
             total_allocatable_memory_bytes: 200 * 1024 * 1024 * 1024,
             node_count: 2,
             last_updated: "2026-07-26T00:00:00Z".to_string(),
+            excluded_node_count: 0,
+            excluded_by_unschedulable: 0,
+            excluded_by_selector: 0,
         });
         writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(c));
         store

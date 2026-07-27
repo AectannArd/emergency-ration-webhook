@@ -56,12 +56,15 @@ fn allocation_with(status: AllocationStatus) -> Allocation {
 
 fn capacity_store(total_cpu: i64, total_mem: i64, last_updated: &str) -> Store<ClusterCapacity> {
     let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-    let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {});
+    let mut c = ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec { node_selector: None });
     c.status = Some(ClusterCapacityStatus {
         total_allocatable_cpu_milli: total_cpu,
         total_allocatable_memory_bytes: total_mem,
         node_count: 2,
         last_updated: last_updated.to_string(),
+        excluded_node_count: 0,
+        excluded_by_unschedulable: 0,
+        excluded_by_selector: 0,
     });
     writer.apply_watcher_event(&watcher::Event::Apply(c));
     store

@@ -60,12 +60,15 @@ fn populated_store() -> Store<Allocation> {
 fn capacity_store() -> Store<ClusterCapacity> {
     use capacity_admission_webhook::crd::{ClusterCapacitySpec, ClusterCapacityStatus};
     let (store, mut writer) = kube::runtime::reflector::store::<ClusterCapacity>();
-    let mut c = ClusterCapacity::new("cluster-capacity", ClusterCapacitySpec {});
+    let mut c = ClusterCapacity::new("cluster-capacity", ClusterCapacitySpec { node_selector: None });
     c.status = Some(ClusterCapacityStatus {
         total_allocatable_cpu_milli: 100_000,
         total_allocatable_memory_bytes: 200 * GIB,
         node_count: 2,
         last_updated: spec_allocation_status().last_updated.clone(),
+        excluded_node_count: 0,
+        excluded_by_unschedulable: 0,
+        excluded_by_selector: 0,
     });
     writer.apply_watcher_event(&watcher::Event::Apply(c));
     store
