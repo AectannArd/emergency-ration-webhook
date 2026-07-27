@@ -634,6 +634,71 @@ mod tests {
         assert_eq!(effective_selector(None), None);
     }
 
+    // ---- spec-006 US3: exclusion observability (T034-T035) ----
+
+    #[test]
+    fn combined_breakdown_reports_excluded_nodes_by_reason() {
+        // US3 / T034: 5 nodes — 3 workers, 1 cordoned, 1 control-plane
+        // (selector-matched). The breakdown reports the reason for each exclusion
+        // and excludedNodeCount = excludedByUnschedulable + excludedBySelector.
+        let sel = control_plane_selector();
+        let nodes = vec![
+            labeled("w1", "8", "16Gi", &[("role", "worker")]),
+            labeled("w2", "8", "16Gi", &[("role", "worker")]),
+            labeled("w3", "8", "16Gi", &[("role", "worker")]),
+            cordoned("cordon", "16", "32Gi"),
+            labeled(
+                "cp",
+                "16",
+                "32Gi",
+                &[("node-role.kubernetes.io/control-plane", "")],
+            ),
+        ];
+        let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, Some(&sel));
+        assert_eq!(count, 3);
+        assert_eq!(cpu, 24_000, "3 workers × 8 cores");
+        assert_eq!(memory, 48 * 1024 * 1024 * 1024);
+        assert_eq!(breakdown.counted, 3);
+        assert_eq!(breakdown.excluded_unschedulable, 1);
+        assert_eq!(breakdown.excluded_by_selector, 1);
+        assert_eq!(breakdown.excluded_node_count(), 2);
+    }
+
+    #[test]
+    fn node_both_unschedulable_and_selector_matched_is_not_double_counted() {
+        // US3 / T035: a node that is BOTH cordoned AND selector-matched is
+        // attributed to excludedByUnschedulable only (unschedulable is checked
+        // first) — never double-counted. excludedNodeCount must equal the number
+        // of distinct excluded nodes.
+        let sel = control_plane_selector();
+        let mut dual = labeled(
+            "cp-cordoned",
+            "16",
+            "32Gi",
+            &[("node-role.kubernetes.io/control-plane", "")],
+        );
+        dual.spec = Some(k8s_openapi::api::core::v1::NodeSpec {
+            unschedulable: Some(true),
+            ..Default::default()
+        });
+        let nodes = vec![labeled("w1", "8", "16Gi", &[("role", "worker")]), dual];
+        let (_cpu, _memory, count, breakdown) = sum_node_allocatable(&nodes, Some(&sel));
+        assert_eq!(count, 1, "only the worker is counted");
+        assert_eq!(
+            breakdown.excluded_unschedulable, 1,
+            "the dual-reason node counts under unschedulable"
+        );
+        assert_eq!(
+            breakdown.excluded_by_selector, 0,
+            "the dual-reason node is NOT also counted under selector"
+        );
+        assert_eq!(
+            breakdown.excluded_node_count(),
+            1,
+            "excludedNodeCount == 1 distinct node, not 2 (no double-count)"
+        );
+    }
+
     // ---- singleton autocreation (ensure_singleton decision logic) ----
 
     /// Build a `kube::Error::Api` carrying a status with the given HTTP code and
