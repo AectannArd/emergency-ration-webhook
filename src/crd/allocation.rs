@@ -70,6 +70,19 @@ pub struct AllocationSpec {
     /// `Some(EnforcementMode::Enforce)` on auto-creation (FR-010) and never
     /// touches the field afterwards — enforcement is a webhook concern.
     pub enforcement_mode: Option<EnforcementMode>,
+
+    /// Optional list of namespace names whose pods are exempt from capacity
+    /// admission (spec-008, FR-001). A pod whose namespace matches any entry is
+    /// admitted without a budget check. Absent/empty → no namespace exclusions
+    /// (backward-compatible, FR-004). JSON field: `excludedNamespaces`.
+    pub excluded_namespaces: Option<Vec<String>>,
+
+    /// Optional list of priority class names whose pods are exempt from capacity
+    /// admission (spec-008, FR-002). Matched as a string against
+    /// `pod.spec.priorityClassName` (no PriorityClass resource resolution, R3).
+    /// Absent/empty → no priority class exclusions (FR-004). JSON field:
+    /// `excludedPriorityClasses`.
+    pub excluded_priority_classes: Option<Vec<String>>,
 }
 
 /// Status of the Allocation CRD, populated by the Allocation Controller.
@@ -227,5 +240,104 @@ mod tests {
             !lists_enforcement,
             "enforcementMode must be optional, not required (FR-003)"
         );
+    }
+
+    // ---- spec-008: excludedNamespaces + excludedPriorityClasses ----
+
+    #[test]
+    fn allocation_spec_exclusion_fields_round_trip_camel_case() {
+        // T001: the two new fields serialise camelCase and round-trip.
+        let spec = AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+            excluded_namespaces: Some(vec!["kube-system".to_string(), "monitoring".to_string()]),
+            excluded_priority_classes: Some(vec!["system-node-critical".to_string()]),
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            json.get("excludedNamespaces")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2),
+            "excludedNamespaces serialises as a camelCase array: {json}"
+        );
+        assert_eq!(
+            json.get("excludedNamespaces")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("kube-system")
+        );
+        assert_eq!(
+            json.get("excludedPriorityClasses")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1),
+            "excludedPriorityClasses serialises as a camelCase array: {json}"
+        );
+        let back: AllocationSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.excluded_namespaces, spec.excluded_namespaces);
+        assert_eq!(
+            back.excluded_priority_classes,
+            spec.excluded_priority_classes
+        );
+    }
+
+    #[test]
+    fn allocation_spec_absent_exclusion_fields_default_to_none() {
+        // T001: a pre-spec-008 Allocation (fields absent) deserialises with both
+        // new fields as None — backward-compatible default (FR-004).
+        let pre_008 = serde_json::json!({
+            "budgetPercent": 80,
+            "enforcementMode": "enforce",
+        });
+        let spec: AllocationSpec = serde_json::from_value(pre_008).unwrap();
+        assert_eq!(spec.budget_percent, 80);
+        assert_eq!(spec.enforcement_mode, Some(EnforcementMode::Enforce));
+        assert!(
+            spec.excluded_namespaces.is_none(),
+            "absent excludedNamespaces must default to None (FR-004)"
+        );
+        assert!(
+            spec.excluded_priority_classes.is_none(),
+            "absent excludedPriorityClasses must default to None (FR-004)"
+        );
+    }
+
+    #[test]
+    fn crd_schema_has_optional_exclusion_fields() {
+        // T001: both exclusion fields are optional string arrays (nullable) and
+        // neither is in the spec `required` array (FR-004).
+        let crd = Allocation::crd();
+        let v = serde_json::to_value(&crd).unwrap();
+        let spec_props = v
+            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties")
+            .expect("spec properties present");
+        for field in ["excludedNamespaces", "excludedPriorityClasses"] {
+            let schema = spec_props
+                .get(field)
+                .unwrap_or_else(|| panic!("{field} schema present"));
+            assert_eq!(
+                schema.get("type").and_then(|t| t.as_str()),
+                Some("array"),
+                "{field} is an array-typed field"
+            );
+            let items = schema
+                .get("items")
+                .unwrap_or_else(|| panic!("{field} has items"));
+            assert_eq!(
+                items.get("type").and_then(|t| t.as_str()),
+                Some("string"),
+                "{field} items are strings"
+            );
+        }
+        // Neither field may be required.
+        let required = v
+            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/required")
+            .and_then(|r| r.as_array());
+        for field in ["excludedNamespaces", "excludedPriorityClasses"] {
+            let listed = required.is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(field)));
+            assert!(!listed, "{field} must be optional, not required (FR-004)");
+        }
     }
 }

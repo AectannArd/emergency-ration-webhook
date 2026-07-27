@@ -127,6 +127,8 @@ impl DryRunWorld {
                 AllocationSpec {
                     budget_percent: self.budget_percent,
                     enforcement_mode: Some(self.enforcement_mode),
+                    excluded_namespaces: None,
+                    excluded_priority_classes: None,
                 },
             );
             a.status = Some(AllocationStatus {

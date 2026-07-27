@@ -122,6 +122,8 @@ impl FailSafeWorld {
                 AllocationSpec {
                     budget_percent: self.budget_percent,
                     enforcement_mode: None,
+                    excluded_namespaces: None,
+                    excluded_priority_classes: None,
                 },
             );
             a.status = Some(AllocationStatus {

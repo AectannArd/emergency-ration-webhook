@@ -81,6 +81,8 @@ fn allocation_in(mode: EnforcementMode) -> Allocation {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: Some(mode),
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     a.status = Some(spec_allocation_status());

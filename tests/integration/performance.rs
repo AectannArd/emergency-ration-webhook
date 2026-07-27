@@ -39,6 +39,8 @@ async fn admission_decision_meets_latency_targets() {
         AllocationSpec {
             budget_percent: 80,
             enforcement_mode: None,
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
         },
     );
     allocation.status = Some(AllocationStatus {
