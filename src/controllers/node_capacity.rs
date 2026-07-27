@@ -7,11 +7,13 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::{ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::{reflector, watcher};
 use kube::{Api, Client};
 use tracing::{debug, info, warn};
 
+use super::node_filter::{ExclusionBreakdown, is_node_counted, validate_selector};
 use crate::crd::{
     CLUSTER_CAPACITY_NAME, ClusterCapacity, ClusterCapacitySpec, ClusterCapacityStatus,
 };
@@ -19,23 +21,60 @@ use crate::resources::quantity::{parse_cpu, parse_memory};
 use crate::time_util::now_rfc3339;
 
 /// Sum `cpu` (→ milli-CPUs) and `memory` (→ bytes) from every node's
-/// `.status.allocatable`. Pure: takes references, no client, exhaustively tested.
+/// `.status.allocatable`, applying the spec-006 node filter first. Pure: takes
+/// references, no client, exhaustively tested.
 ///
-/// A node missing `.status.allocatable` (e.g. NotReady, no reported capacity)
-/// contributes nothing. Individual unparseable quantities are skipped — node
-/// allocatable is kubelet-authored and always well-formed in practice.
-pub fn sum_node_allocatable<'a, I>(nodes: I) -> (i64, i64, i32)
+/// The filter excludes (1) unschedulable nodes (`spec.unschedulable = true`,
+/// always — FR-001) and (2) nodes matching the optional `selector` (FR-003). A
+/// node counted toward capacity passes both layers (FR-004). An excluded node
+/// still appears in the [`ExclusionBreakdown`] so the controller can report
+/// *why* capacity changed (spec-006 US3).
+///
+/// A node missing `.status.allocatable` (e.g. NotReady, no reported capacity) is
+/// subject to the exclusion checks for counting but, if it passes them,
+/// contributes nothing to the CPU/memory sum and is not counted (existing
+/// behaviour). Individual unparseable quantities are skipped — node allocatable
+/// is kubelet-authored and always well-formed in practice.
+pub fn sum_node_allocatable<'a, I>(
+    nodes: I,
+    selector: Option<&LabelSelector>,
+) -> (i64, i64, i32, ExclusionBreakdown)
 where
     I: IntoIterator<Item = &'a Node>,
 {
+    // Validate the selector once for the whole cycle (FR-010): an invalid
+    // selector is dropped to None so the cycle falls back to unschedulable-only
+    // exclusion — capacity tracking continues, the filter is never applied with
+    // a partial/invalid match. Re-validated on every event, so a corrected
+    // selector takes effect immediately.
+    let selector = effective_selector(selector);
     let mut cpu = 0i64;
     let mut memory = 0i64;
-    let mut count = 0i32;
+    let mut breakdown = ExclusionBreakdown::default();
     for node in nodes {
+        let unschedulable = node
+            .spec
+            .as_ref()
+            .and_then(|s| s.unschedulable)
+            .unwrap_or(false);
+        let labels = node.metadata.labels.as_ref();
+        if !is_node_counted(unschedulable, labels, selector) {
+            // Attribute to the layer that excluded it. Unschedulable is checked
+            // first inside is_node_counted, so a node excluded by both counts
+            // under excluded_unschedulable only (no double-count).
+            if unschedulable {
+                breakdown.excluded_unschedulable += 1;
+            } else {
+                breakdown.excluded_by_selector += 1;
+            }
+            continue;
+        }
         let Some(allocatable) = node.status.as_ref().and_then(|s| s.allocatable.as_ref()) else {
+            // Counted candidate that reports no allocatable: contributes nothing
+            // and is not counted (existing behaviour).
             continue;
         };
-        count += 1;
+        breakdown.counted += 1;
         if let Some(q) = allocatable.get("cpu") {
             cpu += parse_cpu(&q.0).unwrap_or(0);
         }
@@ -43,7 +82,51 @@ where
             memory += parse_memory(&q.0).unwrap_or(0);
         }
     }
-    (cpu, memory, count)
+    (cpu, memory, breakdown.counted, breakdown)
+}
+
+/// Validate the configured selector once per reconciliation cycle (spec-006
+/// FR-010). A structurally invalid selector is logged and dropped to `None` so
+/// the cycle falls back to unschedulable-only exclusion — the safe default that
+/// keeps capacity tracking functional. Validity is re-checked on every event, so
+/// a corrected selector takes effect immediately.
+fn effective_selector(selector: Option<&LabelSelector>) -> Option<&LabelSelector> {
+    let sel = selector?;
+    match validate_selector(sel) {
+        Ok(()) => Some(sel),
+        Err(err) => {
+            warn!(
+                error = %err,
+                "invalid ClusterCapacity spec.nodeSelector; \
+                 falling back to unschedulable-only exclusion for this cycle"
+            );
+            None
+        }
+    }
+}
+
+/// Read the runtime `nodeSelector` from the `cluster-capacity` singleton spec
+/// (FR-007/FR-011). Read on every reconciliation so a `kubectl patch` takes
+/// effect on the next node event without a restart. Any failure (missing
+/// singleton, transient error) falls back to `None` — unschedulable-only
+/// exclusion — keeping capacity tracking functional.
+async fn read_selector(capacity_api: &Api<ClusterCapacity>) -> Option<LabelSelector> {
+    match capacity_api.get(CLUSTER_CAPACITY_NAME).await {
+        Ok(cc) => cc.spec.node_selector,
+        Err(err) if is_not_found(&err) => {
+            // Singleton vanished mid-run; the patch will recreate it. Fall back
+            // to no selector for this cycle.
+            None
+        }
+        Err(err) => {
+            debug!(
+                %err,
+                "failed to read ClusterCapacity spec.nodeSelector; \
+                 using unschedulable-only exclusion for this cycle"
+            );
+            None
+        }
+    }
 }
 
 /// The decision [`ensure_singleton`] reaches from a singleton existence check.
@@ -92,9 +175,16 @@ fn classify_create<T>(result: &Result<T, kube::Error>) -> CreateOutcome {
 }
 
 /// The default `cluster-capacity` instance created when the singleton is absent:
-/// empty spec (the CRD is supply-side and controller-written, no user fields).
+/// no `nodeSelector` configured (unschedulable-only exclusion, FR-005). An
+/// existing instance is never overwritten, so an operator-set `nodeSelector` is
+/// preserved across restarts.
 fn default_capacity_singleton() -> ClusterCapacity {
-    ClusterCapacity::new(CLUSTER_CAPACITY_NAME, ClusterCapacitySpec {})
+    ClusterCapacity::new(
+        CLUSTER_CAPACITY_NAME,
+        ClusterCapacitySpec {
+            node_selector: None,
+        },
+    )
 }
 
 /// Idempotent get-or-create of the `cluster-capacity` singleton.
@@ -139,18 +229,42 @@ pub async fn ensure_singleton(api: &Api<ClusterCapacity>) {
     }
 }
 
-/// Recompute the aggregate and merge-patch the CRD's `.status` subresource.
+/// Recompute the aggregate and merge-patch the CRD's `.status` subresource,
+/// including the spec-006 exclusion breakdown (US3).
 ///
 /// If the singleton was deleted after startup the patch 404s; we recreate it
 /// (via [`ensure_singleton`]) and retry once so this event's figures are not
 /// lost. Any other failure is logged and retried on the next node event.
-pub async fn patch_status(api: &Api<ClusterCapacity>, cpu: i64, memory: i64, node_count: i32) {
+#[allow(clippy::too_many_arguments)]
+pub async fn patch_status(
+    api: &Api<ClusterCapacity>,
+    cpu: i64,
+    memory: i64,
+    node_count: i32,
+    excluded_node_count: i32,
+    excluded_by_unschedulable: i32,
+    excluded_by_selector: i32,
+) {
     let params = PatchParams::default();
-    match patch_once(api, &params, cpu, memory, node_count).await {
+    match patch_once(
+        api,
+        &params,
+        cpu,
+        memory,
+        node_count,
+        excluded_node_count,
+        excluded_by_unschedulable,
+        excluded_by_selector,
+    )
+    .await
+    {
         Ok(_) => debug!(
             node_count,
             cpu_milli = cpu,
             memory_bytes = memory,
+            excluded_node_count,
+            excluded_by_unschedulable,
+            excluded_by_selector,
             "patched ClusterCapacity status"
         ),
         Err(err) if is_not_found(&err) => {
@@ -159,7 +273,18 @@ pub async fn patch_status(api: &Api<ClusterCapacity>, cpu: i64, memory: i64, nod
                 "ClusterCapacity singleton missing during patch; recreating and retrying once"
             );
             ensure_singleton(api).await;
-            match patch_once(api, &params, cpu, memory, node_count).await {
+            match patch_once(
+                api,
+                &params,
+                cpu,
+                memory,
+                node_count,
+                excluded_node_count,
+                excluded_by_unschedulable,
+                excluded_by_selector,
+            )
+            .await
+            {
                 Ok(_) => debug!(
                     node_count,
                     "patched ClusterCapacity status after recreating singleton"
@@ -174,18 +299,25 @@ pub async fn patch_status(api: &Api<ClusterCapacity>, cpu: i64, memory: i64, nod
 }
 
 /// Build the status from the raw figures and merge-patch it onto the singleton.
+#[allow(clippy::too_many_arguments)]
 async fn patch_once(
     api: &Api<ClusterCapacity>,
     params: &PatchParams,
     cpu: i64,
     memory: i64,
     node_count: i32,
+    excluded_node_count: i32,
+    excluded_by_unschedulable: i32,
+    excluded_by_selector: i32,
 ) -> kube::Result<ClusterCapacity> {
     let status = ClusterCapacityStatus {
         total_allocatable_cpu_milli: cpu,
         total_allocatable_memory_bytes: memory,
         node_count,
         last_updated: now_rfc3339(),
+        excluded_node_count,
+        excluded_by_unschedulable,
+        excluded_by_selector,
     };
     api.patch_status(
         CLUSTER_CAPACITY_NAME,
@@ -201,15 +333,30 @@ async fn patch_once(
 /// the initial node list is delivered (and the Allocation Controller, which
 /// derives its ceiling from this supply, then has nothing to compute from).
 /// Later node events from the reflector keep the status fresh.
-async fn reconcile_now(nodes: &Api<Node>, capacity_api: &Api<ClusterCapacity>) {
-    let (cpu, memory, node_count) = match nodes.list(&ListParams::default()).await {
-        Ok(list) => sum_node_allocatable(&list.items),
+///
+/// Public so the mock-apiserver integration tests can drive the exact reconcile
+/// path (read selector → list nodes → sum → patch) rather than duplicating it.
+pub async fn reconcile_now(nodes: &Api<Node>, capacity_api: &Api<ClusterCapacity>) {
+    // spec-006 US2 (T032): read the runtime nodeSelector from the singleton spec
+    // so a kubectl patch takes effect without a restart (FR-007/FR-011).
+    let selector = read_selector(capacity_api).await;
+    let (cpu, memory, node_count, breakdown) = match nodes.list(&ListParams::default()).await {
+        Ok(list) => sum_node_allocatable(&list.items, selector.as_ref()),
         Err(err) => {
             warn!(%err, "initial node list failed; deferring to watch events");
-            (0, 0, 0)
+            (0, 0, 0, ExclusionBreakdown::default())
         }
     };
-    patch_status(capacity_api, cpu, memory, node_count).await;
+    patch_status(
+        capacity_api,
+        cpu,
+        memory,
+        node_count,
+        breakdown.excluded_node_count(),
+        breakdown.excluded_unschedulable,
+        breakdown.excluded_by_selector,
+    )
+    .await;
 }
 
 /// Run the controller until the runtime is shut down. Owns a node reflector; on
@@ -237,9 +384,23 @@ pub async fn run(client: Client) {
                 match event {
                     Ok(_) => {
                         let snapshot = store.state();
-                        let (cpu, memory, node_count) =
-                            sum_node_allocatable(snapshot.iter().map(|node| node.as_ref()));
-                        patch_status(&capacity_api, cpu, memory, node_count).await;
+                        // spec-006 US2 (T032): read the runtime nodeSelector on
+                        // each event so spec patches take effect immediately.
+                        let selector = read_selector(&capacity_api).await;
+                        let (cpu, memory, node_count, breakdown) = sum_node_allocatable(
+                            snapshot.iter().map(|node| node.as_ref()),
+                            selector.as_ref(),
+                        );
+                        patch_status(
+                            &capacity_api,
+                            cpu,
+                            memory,
+                            node_count,
+                            breakdown.excluded_node_count(),
+                            breakdown.excluded_unschedulable,
+                            breakdown.excluded_by_selector,
+                        )
+                        .await;
                     }
                     Err(err) => warn!(%err, "node watch error"),
                 }
@@ -288,7 +449,7 @@ mod tests {
     #[test]
     fn sums_allocatable_across_nodes() {
         let nodes = vec![node("a", "16", "32Gi"), node("b", "8", "16Gi")];
-        let (cpu, memory, count) = sum_node_allocatable(&nodes);
+        let (cpu, memory, count, _) = sum_node_allocatable(&nodes, None);
         assert_eq!(cpu, 24_000); // (16 + 8) cores
         assert_eq!(memory, 48 * 1024 * 1024 * 1024); // 48 GiB
         assert_eq!(count, 2);
@@ -298,7 +459,7 @@ mod tests {
     fn skips_nodes_without_status() {
         let bare = Node::default();
         let healthy = node("a", "4", "8Gi");
-        let (cpu, memory, count) = sum_node_allocatable(&[bare, healthy]);
+        let (cpu, memory, count, _) = sum_node_allocatable(&[bare, healthy], None);
         assert_eq!(cpu, 4_000);
         assert_eq!(memory, 8 * 1024 * 1024 * 1024);
         assert_eq!(count, 1, "the status-less node is not counted");
@@ -306,7 +467,7 @@ mod tests {
 
     #[test]
     fn empty_cluster_is_zero() {
-        let (cpu, memory, count) = sum_node_allocatable(Vec::<Node>::new().iter());
+        let (cpu, memory, count, _) = sum_node_allocatable(Vec::<Node>::new().iter(), None);
         assert_eq!((cpu, memory, count), (0, 0, 0));
     }
 
@@ -321,10 +482,233 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (cpu, memory, count) = sum_node_allocatable(&[n]);
+        let (cpu, memory, count, _) = sum_node_allocatable(&[n], None);
         assert_eq!(cpu, 2_000);
         assert_eq!(memory, 0);
         assert_eq!(count, 1);
+    }
+
+    // ---- spec-006 US1: unschedulable nodes excluded from the aggregate ----
+
+    /// Build a node with the given allocatable that is cordoned
+    /// (`spec.unschedulable = true`).
+    fn cordoned(name: &str, cpu: &str, memory: &str) -> Node {
+        let mut n = node(name, cpu, memory);
+        n.spec = Some(k8s_openapi::api::core::v1::NodeSpec {
+            unschedulable: Some(true),
+            ..Default::default()
+        });
+        n
+    }
+
+    /// Build a schedulable node carrying the given labels (for selector tests).
+    fn labeled(name: &str, cpu: &str, memory: &str, labels: &[(&str, &str)]) -> Node {
+        let mut n = node(name, cpu, memory);
+        n.metadata.labels = Some(
+            labels
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        );
+        n
+    }
+
+    #[test]
+    fn sum_excludes_unschedulable_nodes() {
+        // 3 nodes, one cordoned. The aggregate reflects only the 2 schedulable
+        // nodes; the breakdown reports 1 excluded-by-unschedulable (FR-001).
+        use crate::controllers::node_filter::ExclusionBreakdown;
+        let nodes = vec![
+            node("a", "8", "16Gi"),
+            node("b", "4", "8Gi"),
+            cordoned("cp", "16", "32Gi"),
+        ];
+        let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, None);
+        assert_eq!(cpu, 12_000, "only the 2 schedulable nodes' CPU counts");
+        assert_eq!(memory, 24 * 1024 * 1024 * 1024);
+        assert_eq!(count, 2);
+        assert_eq!(
+            breakdown,
+            ExclusionBreakdown {
+                counted: 2,
+                excluded_unschedulable: 1,
+                excluded_by_selector: 0,
+            }
+        );
+        assert_eq!(breakdown.excluded_node_count(), 1);
+    }
+
+    #[test]
+    fn all_unschedulable_cluster_is_zero_capacity() {
+        // Constitution Principle I interaction: when every node is excluded,
+        // capacity drops to zero — the webhook then fails closed on every
+        // admission. This is correct, not a bug.
+        let nodes = vec![cordoned("a", "16", "32Gi"), cordoned("b", "16", "32Gi")];
+        let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, None);
+        assert_eq!((cpu, memory, count), (0, 0, 0));
+        assert_eq!(breakdown.counted, 0);
+        assert_eq!(breakdown.excluded_unschedulable, 2);
+        assert_eq!(breakdown.excluded_by_selector, 0);
+        assert_eq!(breakdown.excluded_node_count(), 2);
+    }
+
+    // ---- spec-006 US2: label-selector exclusion ----
+
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
+
+    /// A selector that matches nodes carrying the control-plane role label.
+    fn control_plane_selector() -> LabelSelector {
+        LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "node-role.kubernetes.io/control-plane".to_string(),
+                operator: "Exists".to_string(),
+                values: None,
+            }]),
+        }
+    }
+
+    #[test]
+    fn sum_excludes_nodes_matching_label_selector() {
+        // T026: 2 workers + 1 control-plane node; the selector excludes the
+        // control-plane node → aggregate reflects the 2 workers, breakdown
+        // reports 1 excluded-by-selector (FR-003).
+        use crate::controllers::node_filter::ExclusionBreakdown;
+        let sel = control_plane_selector();
+        let nodes = vec![
+            labeled("w1", "8", "16Gi", &[("role", "worker")]),
+            labeled("w2", "8", "16Gi", &[("role", "worker")]),
+            labeled(
+                "cp",
+                "16",
+                "32Gi",
+                &[("node-role.kubernetes.io/control-plane", "")],
+            ),
+        ];
+        let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, Some(&sel));
+        assert_eq!(cpu, 16_000, "only the 2 workers' CPU counts");
+        assert_eq!(memory, 32 * 1024 * 1024 * 1024);
+        assert_eq!(count, 2);
+        assert_eq!(
+            breakdown,
+            ExclusionBreakdown {
+                counted: 2,
+                excluded_unschedulable: 0,
+                excluded_by_selector: 1,
+            }
+        );
+        assert_eq!(breakdown.excluded_node_count(), 1);
+    }
+
+    #[test]
+    fn invalid_selector_falls_back_to_unschedulable_only() {
+        // T027 / FR-010: a structurally invalid selector (unknown operator) is
+        // ignored for this cycle — no selector-based exclusion — while
+        // unschedulable nodes are still excluded (the safe default).
+        let invalid = LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "role".to_string(),
+                operator: "Matches".to_string(),
+                values: None,
+            }]),
+        };
+        let nodes = vec![
+            labeled("w1", "8", "16Gi", &[("role", "worker")]),
+            cordoned("cp", "16", "32Gi"),
+        ];
+        let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, Some(&invalid));
+        // Fallback: the worker is counted (no selector applied), the cordoned
+        // node excluded by unschedulable.
+        assert_eq!((cpu, memory, count), (8_000, 16 * 1024 * 1024 * 1024, 1));
+        assert_eq!(
+            breakdown.excluded_by_selector, 0,
+            "invalid selector must not exclude any node"
+        );
+        assert_eq!(breakdown.excluded_unschedulable, 1);
+    }
+
+    #[test]
+    fn effective_selector_passes_valid_and_drops_invalid() {
+        // T031: the per-cycle selector decision. A valid selector passes through;
+        // an invalid one is dropped to None (FR-010 fallback); None stays None.
+        let valid = control_plane_selector();
+        assert_eq!(effective_selector(Some(&valid)), Some(&valid));
+        let invalid = LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "role".to_string(),
+                operator: "Bogus".to_string(),
+                values: None,
+            }]),
+        };
+        assert_eq!(effective_selector(Some(&invalid)), None);
+        assert_eq!(effective_selector(None), None);
+    }
+
+    // ---- spec-006 US3: exclusion observability (T034-T035) ----
+
+    #[test]
+    fn combined_breakdown_reports_excluded_nodes_by_reason() {
+        // US3 / T034: 5 nodes — 3 workers, 1 cordoned, 1 control-plane
+        // (selector-matched). The breakdown reports the reason for each exclusion
+        // and excludedNodeCount = excludedByUnschedulable + excludedBySelector.
+        let sel = control_plane_selector();
+        let nodes = vec![
+            labeled("w1", "8", "16Gi", &[("role", "worker")]),
+            labeled("w2", "8", "16Gi", &[("role", "worker")]),
+            labeled("w3", "8", "16Gi", &[("role", "worker")]),
+            cordoned("cordon", "16", "32Gi"),
+            labeled(
+                "cp",
+                "16",
+                "32Gi",
+                &[("node-role.kubernetes.io/control-plane", "")],
+            ),
+        ];
+        let (cpu, memory, count, breakdown) = sum_node_allocatable(&nodes, Some(&sel));
+        assert_eq!(count, 3);
+        assert_eq!(cpu, 24_000, "3 workers × 8 cores");
+        assert_eq!(memory, 48 * 1024 * 1024 * 1024);
+        assert_eq!(breakdown.counted, 3);
+        assert_eq!(breakdown.excluded_unschedulable, 1);
+        assert_eq!(breakdown.excluded_by_selector, 1);
+        assert_eq!(breakdown.excluded_node_count(), 2);
+    }
+
+    #[test]
+    fn node_both_unschedulable_and_selector_matched_is_not_double_counted() {
+        // US3 / T035: a node that is BOTH cordoned AND selector-matched is
+        // attributed to excludedByUnschedulable only (unschedulable is checked
+        // first) — never double-counted. excludedNodeCount must equal the number
+        // of distinct excluded nodes.
+        let sel = control_plane_selector();
+        let mut dual = labeled(
+            "cp-cordoned",
+            "16",
+            "32Gi",
+            &[("node-role.kubernetes.io/control-plane", "")],
+        );
+        dual.spec = Some(k8s_openapi::api::core::v1::NodeSpec {
+            unschedulable: Some(true),
+            ..Default::default()
+        });
+        let nodes = vec![labeled("w1", "8", "16Gi", &[("role", "worker")]), dual];
+        let (_cpu, _memory, count, breakdown) = sum_node_allocatable(&nodes, Some(&sel));
+        assert_eq!(count, 1, "only the worker is counted");
+        assert_eq!(
+            breakdown.excluded_unschedulable, 1,
+            "the dual-reason node counts under unschedulable"
+        );
+        assert_eq!(
+            breakdown.excluded_by_selector, 0,
+            "the dual-reason node is NOT also counted under selector"
+        );
+        assert_eq!(
+            breakdown.excluded_node_count(),
+            1,
+            "excludedNodeCount == 1 distinct node, not 2 (no double-count)"
+        );
     }
 
     // ---- singleton autocreation (ensure_singleton decision logic) ----
@@ -339,7 +723,9 @@ mod tests {
     fn existing_singleton_is_not_recreated() {
         let lookup: Result<ClusterCapacity, kube::Error> = Ok(ClusterCapacity::new(
             CLUSTER_CAPACITY_NAME,
-            ClusterCapacitySpec {},
+            ClusterCapacitySpec {
+                node_selector: None,
+            },
         ));
         // Exists ⇒ ensure_singleton does not call create (no overwrite).
         assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
@@ -380,6 +766,18 @@ mod tests {
         let cc = default_capacity_singleton();
         assert_eq!(cc.metadata.name.as_deref(), Some(CLUSTER_CAPACITY_NAME));
         // Spec is empty (no user fields); constructing it is the whole point.
+    }
+
+    #[test]
+    fn default_singleton_spec_has_no_node_selector() {
+        // spec-006: the auto-created singleton must not set a nodeSelector —
+        // unschedulable-only exclusion is the default (FR-005). An operator's
+        // later patch is the only thing that populates it.
+        let cc = default_capacity_singleton();
+        assert!(
+            cc.spec.node_selector.is_none(),
+            "auto-created singleton must not set a nodeSelector (FR-005 default)"
+        );
     }
 
     #[test]
@@ -487,7 +885,7 @@ mod tests {
         let (client, mut handle) = mock_client();
         let api = Api::<ClusterCapacity>::all(client);
         let task = tokio::spawn(async move {
-            patch_status(&api, 16_000, 32 * 1024 * 1024 * 1024, 1).await;
+            patch_status(&api, 16_000, 32 * 1024 * 1024 * 1024, 1, 0, 0, 0).await;
         });
 
         // 1. Initial status PATCH → 404 (singleton vanished mid-run).
@@ -524,7 +922,18 @@ mod tests {
             reconcile_now(&nodes, &capacity_api).await;
         });
 
-        // 1. Node LIST → one node with 16 CPU / 32 GiB allocatable.
+        // 1. spec-006: read the runtime nodeSelector — GET the singleton (here
+        // the default, no nodeSelector → unschedulable-only exclusion).
+        let (req, respond) = handle.next_request().await.expect("capacity GET");
+        assert_eq!(req.method().as_str(), "GET");
+        assert!(
+            req.uri().path().ends_with("/cluster-capacity"),
+            "GET targets the singleton for the selector read: {}",
+            req.uri()
+        );
+        respond.send_response(ok_object(&default_capacity_singleton()));
+
+        // 2. Node LIST → one node with 16 CPU / 32 GiB allocatable.
         let (req, respond) = handle.next_request().await.expect("node LIST");
         assert_eq!(req.method().as_str(), "GET");
         assert!(
@@ -542,7 +951,7 @@ mod tests {
         });
         respond.send_response(ok_object(&node_list));
 
-        // 2. Status PATCH on the singleton → 200. The body must carry the
+        // 3. Status PATCH on the singleton → 200. The body must carry the
         // aggregate under a top-level "status" key: a bare status object is a
         // silent no-op on the /status subresource (patch returns 200, nothing
         // persists). Assert both the envelope and the summed figures.
@@ -571,6 +980,14 @@ mod tests {
             Some(32 * 1024 * 1024 * 1024)
         );
         assert_eq!(payload["status"]["nodeCount"].as_i64(), Some(1));
+        // spec-006: the exclusion breakdown is always patched (here 0 — the
+        // single mock node is schedulable and no selector is configured).
+        assert_eq!(payload["status"]["excludedNodeCount"].as_i64(), Some(0));
+        assert_eq!(
+            payload["status"]["excludedByUnschedulable"].as_i64(),
+            Some(0)
+        );
+        assert_eq!(payload["status"]["excludedBySelector"].as_i64(), Some(0));
         respond.send_response(ok_object(&default_capacity_singleton()));
 
         task.await.expect("reconcile_now did not panic");

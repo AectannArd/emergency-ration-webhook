@@ -295,19 +295,97 @@ existing instance is never overwritten (an operator-set budget is preserved).
 
 **Identity**: `clustercapacities.emergency-ration.dev` (short name `cc`), API group
 `emergency-ration.dev/v1`, kind `ClusterCapacity`. Cluster-scoped singleton,
-convention instance name **`cluster-capacity`**. Its `spec` is empty — it is
-supply-side and controller-written, with no user-configurable fields. Source:
+convention instance name **`cluster-capacity`**. It is supply-side: the Node
+Capacity Controller sums every node's `.status.allocatable` into its `status`,
+refreshing on each node event. Source:
 [`src/crd/cluster_capacity.rs`](./src/crd/cluster_capacity.rs). The instance is
-created and refreshed automatically by the Node Capacity Controller.
+created automatically and an existing one is never overwritten — so an
+operator-set `nodeSelector` is preserved across restarts.
 
-**Status** (controller-computed):
+**Spec** (the user-configurable field):
+
+| Field | Type | Constraint | Description |
+|-------|------|------------|-------------|
+| `nodeSelector` | object (LabelSelector) | optional | Nodes matching this selector are excluded from the capacity aggregate (spec-006). Standard Kubernetes `LabelSelector` (`matchLabels` + `matchExpressions`). Absent or empty → only unschedulable nodes are excluded. See [Node Exclusion](#node-exclusion). |
+
+**Status** (controller-computed — read-only for operators):
 
 | Field | Type | Unit | Description |
 |-------|------|------|-------------|
-| `totalAllocatableCpuMilli` | integer | milli-CPUs | Total allocatable CPU across all nodes |
-| `totalAllocatableMemoryBytes` | integer | bytes | Total allocatable memory across all nodes |
-| `nodeCount` | integer | count | Number of nodes counted |
+| `totalAllocatableCpuMilli` | integer | milli-CPUs | Total allocatable CPU across counted nodes |
+| `totalAllocatableMemoryBytes` | integer | bytes | Total allocatable memory across counted nodes |
+| `nodeCount` | integer | count | Number of nodes counted toward the aggregate |
 | `lastUpdated` | string | RFC 3339 | Last recomputation timestamp |
+| `excludedNodeCount` | integer | count | Total nodes excluded (`excludedByUnschedulable + excludedBySelector`) |
+| `excludedByUnschedulable` | integer | count | Nodes excluded because `spec.unschedulable = true` |
+| `excludedBySelector` | integer | count | Nodes excluded because they matched `spec.nodeSelector` |
+
+### Node Exclusion
+
+The capacity aggregate does **not** count every node — it excludes nodes the
+kube-scheduler cannot place workloads on, so the budget reflects capacity the
+cluster can actually use. There are two exclusion layers (spec-006):
+
+1. **Unschedulable nodes (default, always on).** Any node with
+   `spec.unschedulable = true` (cordoned nodes, and typically control-plane
+   masters) is excluded. This cannot be disabled. It fixes a phantom-capacity
+   bug where cordoned nodes inflated the supply pool.
+2. **Label-selector exclusion (optional).** Set `spec.nodeSelector` to exclude an
+   arbitrary node subset by label — e.g. control-plane nodes by role label.
+
+A node is counted only if it passes **both** layers. When all nodes are excluded,
+capacity drops to zero and the webhook fails closed on every admission (correct —
+no verifiable capacity).
+
+The status reports the breakdown: `excludedNodeCount`, `excludedByUnschedulable`,
+`excludedBySelector`. A node that is both unschedulable and selector-matched is
+counted under `excludedByUnschedulable` only (never double-counted).
+
+#### Exclude control-plane nodes by label
+
+```sh
+kubectl patch clustercapacity cluster-capacity --type=merge -p '
+  spec:
+    nodeSelector:
+      matchExpressions:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+'
+```
+
+#### Exclude nodes by label value
+
+```sh
+kubectl patch clustercapacity cluster-capacity --type=merge -p '
+  spec:
+    nodeSelector:
+      matchLabels:
+        dedicated: system
+'
+```
+
+The selector is read from the spec on every reconciliation, so a patch takes
+effect on the next node event **without a restart**. A structurally invalid
+selector (unknown operator, `In` without values) is rejected with a logged
+warning and the controller falls back to unschedulable-only exclusion for that
+cycle — capacity tracking continues; a corrected selector takes effect
+immediately.
+
+#### Remove the selector (revert to unschedulable-only)
+
+```sh
+kubectl patch clustercapacity cluster-capacity --type=json -p '
+  [{"op": "remove", "path": "/spec/nodeSelector"}]
+'
+```
+
+#### Inspect the exclusion breakdown
+
+```sh
+kubectl get clustercapacity cluster-capacity -o jsonpath='{.status}'
+# {"totalAllocatableCpuMilli":24000,...,"nodeCount":3,
+#  "excludedNodeCount":2,"excludedByUnschedulable":1,"excludedBySelector":1,...}
+```
 
 ### Adjusting the Budget at Runtime
 
@@ -727,6 +805,7 @@ src/
 │   └── cluster_capacity.rs  # ClusterCapacity CRD (status only)
 ├── controllers/
 │   ├── node_capacity.rs     # supply side: nodes → ClusterCapacity status
+│   ├── node_filter.rs       # spec-006: node-exclusion filter (unschedulable + label selector)
 │   └── allocation.rs        # demand side: pods + supply → Allocation status
 ├── resources/
 │   └── quantity.rs          # Kubernetes resource-quantity parsing (cpu→milli, memory→bytes)
