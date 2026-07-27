@@ -5,6 +5,13 @@
 > `specs/001-capacity-admission-webhook/contracts/clustercapacity-crd.md`.
 > All unmodified sections from the base contract remain in force.
 
+> **Superseded by spec-007**: the singular `spec.nodeSelector` field introduced
+> here was renamed to `spec.nodeSelectors` — a **list** of selectors with OR
+> semantics (a node matching any selector is excluded) — in spec-007
+> (`specs/007-multi-selector-exclusion/`). This document records the spec-006
+> contract as shipped; for the current field shape see
+> `specs/007-multi-selector-exclusion/contracts/clustercapacity-crd.md`.
+
 ## Overview
 
 The `ClusterCapacity` CRD gains:

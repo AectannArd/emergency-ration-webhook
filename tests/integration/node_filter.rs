@@ -6,9 +6,11 @@
 //!
 //! - `cordon_*`: a node list with one `unschedulable: true` node; the status
 //!   PATCH must exclude it and report `excludedByUnschedulable: 1`.
-//! - `selector_*`: a `ClusterCapacity` spec carrying a `nodeSelector` that matches
+//! - `selector_*`: a `ClusterCapacity` spec carrying `nodeSelectors` that match
 //!   control-plane nodes; the status PATCH must exclude them and report
 //!   `excludedBySelector`.
+//! - `multi_selector_*`: a spec carrying two selectors (control-plane +
+//!   experimental); the status PATCH excludes both label groups (OR semantics).
 //!
 //! The mock harness here mirrors `src/controllers/mock_api.rs`, which is
 //! `#[cfg(test)]`/`pub(crate)` and therefore unreachable from a separate test
@@ -44,12 +46,12 @@ fn ok<T: serde::Serialize>(obj: &T) -> Response<Body> {
         .expect("static response builds")
 }
 
-/// The default `cluster-capacity` singleton (no nodeSelector → unschedulable-only).
+/// The default `cluster-capacity` singleton (no nodeSelectors → unschedulable-only).
 fn default_capacity() -> ClusterCapacity {
     ClusterCapacity::new(
         CLUSTER_CAPACITY_NAME,
         ClusterCapacitySpec {
-            node_selector: None,
+            node_selectors: None,
         },
     )
 }
@@ -60,6 +62,18 @@ fn control_plane_selector() -> LabelSelector {
         match_labels: None,
         match_expressions: Some(vec![LabelSelectorRequirement {
             key: "node-role.kubernetes.io/control-plane".to_string(),
+            operator: "Exists".to_string(),
+            values: None,
+        }]),
+    }
+}
+
+/// A selector that matches nodes carrying the experimental-type label.
+fn experimental_selector() -> LabelSelector {
+    LabelSelector {
+        match_labels: None,
+        match_expressions: Some(vec![LabelSelectorRequirement {
+            key: "node-type/experimental".to_string(),
             operator: "Exists".to_string(),
             values: None,
         }]),
@@ -88,7 +102,7 @@ async fn cordon_event_excludes_unschedulable_node_from_capacity() {
         reconcile_now(&nodes, &capacity_api).await;
     });
 
-    // 1. Read the selector — GET the singleton (default, no nodeSelector).
+    // 1. Read the selector — GET the singleton (default, no nodeSelectors).
     let (req, respond) = handle.next_request().await.expect("capacity GET");
     assert_eq!(req.method().as_str(), "GET");
     respond.send_response(ok(&default_capacity()));
@@ -146,13 +160,13 @@ async fn selector_excludes_control_plane_nodes_from_capacity() {
         reconcile_now(&nodes, &capacity_api).await;
     });
 
-    // 1. Read the selector — GET the singleton carrying a nodeSelector that
-    //    matches control-plane nodes.
+    // 1. Read the selector — GET the singleton carrying nodeSelectors that
+    //    match control-plane nodes.
     let (_req, respond) = handle.next_request().await.expect("capacity GET");
     let capacity_with_selector = ClusterCapacity::new(
         CLUSTER_CAPACITY_NAME,
         ClusterCapacitySpec {
-            node_selector: Some(control_plane_selector()),
+            node_selectors: Some(vec![control_plane_selector()]),
         },
     );
     respond.send_response(ok(&capacity_with_selector));
@@ -192,6 +206,75 @@ async fn selector_excludes_control_plane_nodes_from_capacity() {
     );
     assert_eq!(payload["status"]["excludedBySelector"].as_i64(), Some(1));
     assert_eq!(payload["status"]["excludedNodeCount"].as_i64(), Some(1));
+    respond.send_response(ok(&default_capacity()));
+
+    task.await.expect("reconcile did not panic");
+}
+
+// ---------------------------------------------------------------------------
+// spec-007 US1: multi-selector OR exclusion (T019)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn multi_selector_excludes_both_label_groups_from_capacity() {
+    // A ClusterCapacity spec carrying nodeSelectors with TWO selectors
+    // (control-plane + experimental). Nodes matching EITHER are excluded — the
+    // full read-selectors → list → sum → patch path is exercised end-to-end.
+    let (client, mut handle) = mock_client();
+    let nodes = Api::<Node>::all(client.clone());
+    let capacity_api = Api::<ClusterCapacity>::all(client);
+    let task = tokio::spawn(async move {
+        reconcile_now(&nodes, &capacity_api).await;
+    });
+
+    // 1. Read the selectors — GET the singleton carrying nodeSelectors with 2
+    //    selectors.
+    let (_req, respond) = handle.next_request().await.expect("capacity GET");
+    let capacity_with_selectors = ClusterCapacity::new(
+        CLUSTER_CAPACITY_NAME,
+        ClusterCapacitySpec {
+            node_selectors: Some(vec![control_plane_selector(), experimental_selector()]),
+        },
+    );
+    respond.send_response(ok(&capacity_with_selectors));
+
+    // 2. Node LIST — 2 workers + 1 control-plane + 1 experimental node.
+    let (_req, respond) = handle.next_request().await.expect("node LIST");
+    let node_list = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "NodeList",
+        "items": [
+            {"metadata": {"name": "w1", "labels": {"role": "worker"}},
+             "status": {"allocatable": {"cpu": "8", "memory": "16Gi"}}},
+            {"metadata": {"name": "w2", "labels": {"role": "worker"}},
+             "status": {"allocatable": {"cpu": "8", "memory": "16Gi"}}},
+            {"metadata": {"name": "cp",
+                          "labels": {"node-role.kubernetes.io/control-plane": ""}},
+             "status": {"allocatable": {"cpu": "16", "memory": "32Gi"}}},
+            {"metadata": {"name": "exp", "labels": {"node-type/experimental": ""}},
+             "status": {"allocatable": {"cpu": "16", "memory": "32Gi"}}}
+        ]
+    });
+    respond.send_response(ok(&node_list));
+
+    // 3. Status PATCH — both selector-matched groups are excluded (OR semantics).
+    let (req, respond) = handle.next_request().await.expect("status PATCH");
+    let payload = patch_body(req).await;
+    assert_eq!(
+        payload["status"]["nodeCount"].as_i64(),
+        Some(2),
+        "only the 2 workers are counted: {payload}"
+    );
+    assert_eq!(
+        payload["status"]["totalAllocatableCpuMilli"].as_i64(),
+        Some(16_000)
+    );
+    assert_eq!(
+        payload["status"]["excludedByUnschedulable"].as_i64(),
+        Some(0)
+    );
+    assert_eq!(payload["status"]["excludedBySelector"].as_i64(), Some(2));
+    assert_eq!(payload["status"]["excludedNodeCount"].as_i64(), Some(2));
     respond.send_response(ok(&default_capacity()));
 
     task.await.expect("reconcile did not panic");

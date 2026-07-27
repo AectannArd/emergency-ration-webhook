@@ -56,7 +56,7 @@ async fn admission_decision_meets_latency_targets() {
     let mut capacity = ClusterCapacity::new(
         CLUSTER_CAPACITY_NAME,
         ClusterCapacitySpec {
-            node_selector: None,
+            node_selectors: None,
         },
     );
     capacity.status = Some(ClusterCapacityStatus {

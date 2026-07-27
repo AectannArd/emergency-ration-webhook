@@ -96,7 +96,7 @@ impl DryRunWorld {
             let mut c = ClusterCapacity::new(
                 CLUSTER_CAPACITY_NAME,
                 ClusterCapacitySpec {
-                    node_selector: None,
+                    node_selectors: None,
                 },
             );
             c.status = Some(ClusterCapacityStatus {

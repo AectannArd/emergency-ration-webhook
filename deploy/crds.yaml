@@ -32,34 +32,36 @@ spec:
             spec:
               type: object
               properties:
-                nodeSelector:
-                  type: object
+                nodeSelectors:
+                  type: array
                   description: >
-                    Optional label selector for excluding nodes from the
-                    capacity aggregate. Nodes matching the selector are not
-                    counted toward total capacity. Uses standard Kubernetes
-                    LabelSelector semantics (matchLabels + matchExpressions).
-                    When absent or empty, only unschedulable nodes
-                    (spec.unschedulable = true) are excluded.
-                  properties:
-                    matchLabels:
-                      type: object
-                      additionalProperties:
-                        type: string
-                    matchExpressions:
-                      type: array
-                      items:
+                    Optional list of label selectors for excluding nodes from
+                    the capacity aggregate. A node matching ANY selector is
+                    excluded (OR semantics). Each selector uses standard
+                    Kubernetes LabelSelector semantics (matchLabels +
+                    matchExpressions). When absent or empty, only unschedulable
+                    nodes (spec.unschedulable = true) are excluded.
+                  items:
+                    type: object
+                    properties:
+                      matchLabels:
                         type: object
-                        required: ["key", "operator"]
-                        properties:
-                          key:
-                            type: string
-                          operator:
-                            type: string
-                          values:
-                            type: array
-                            items:
+                        additionalProperties:
+                          type: string
+                      matchExpressions:
+                        type: array
+                        items:
+                          type: object
+                          required: ["key", "operator"]
+                          properties:
+                            key:
                               type: string
+                            operator:
+                              type: string
+                            values:
+                              type: array
+                              items:
+                                type: string
             status:
               type: object
               properties:
@@ -94,7 +96,7 @@ spec:
                   type: integer
                   format: int32
                   minimum: 0
-                  description: Nodes excluded because they matched spec.nodeSelector.
+                  description: Nodes excluded because they matched spec.nodeSelectors.
 
 ---
 apiVersion: apiextensions.k8s.io/v1

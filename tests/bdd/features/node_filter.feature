@@ -4,8 +4,9 @@ Feature: Schedulable node filter
   So that the budget reflects capacity kube-scheduler can actually place on.
 
   Cordoned nodes (spec.unschedulable = true) are excluded by default; an optional
-  ClusterCapacity spec.nodeSelector excludes arbitrary node subsets by label. The
-  status reports how many nodes were excluded and why (spec-006).
+  ClusterCapacity spec.nodeSelectors list excludes arbitrary node subsets by label
+  (a node matching ANY selector is excluded, OR semantics). The status reports
+  how many nodes were excluded and why (spec-007).
 
   # US1 — cordoned nodes excluded by default (P1, the phantom-capacity fix)
   @cordon
@@ -35,3 +36,13 @@ Feature: Schedulable node filter
     And the excludedNodeCount is 2
     And the excludedByUnschedulable count is 1
     And the excludedBySelector count is 1
+
+  # spec-007 — multi-selector OR exclusion
+  @multi-selector
+  Scenario: Nodes matching any of multiple selectors are excluded
+    Given a cluster with 2 worker nodes, 1 control-plane node, and 1 experimental node
+    And the nodeSelectors exclude control-plane and experimental nodes
+    When the controller reconciles
+    Then the status reports nodeCount 2
+    And the excludedBySelector count is 2
+    And the excludedByUnschedulable count is 0

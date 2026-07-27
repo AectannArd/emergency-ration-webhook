@@ -22,14 +22,14 @@ pub const CLUSTER_CAPACITY_NAME: &str = "cluster-capacity";
 // means `scope: Cluster`), matching data-model.md §1.
 /// Spec of the ClusterCapacity CRD. Supply-side: the controller sums node
 /// `.status.allocatable` into the status. The single optional field,
-/// `node_selector`, is the user-configurable node-exclusion selector (spec-006).
+/// `node_selectors`, is the user-configurable node-exclusion list (spec-007).
 pub struct ClusterCapacitySpec {
-    /// Optional label selector for excluding nodes from the capacity aggregate
-    /// (spec-006). Nodes matching the selector are not counted toward total
-    /// capacity. When absent or empty, only unschedulable nodes
-    /// (`spec.unschedulable = true`) are excluded (FR-005). Standard Kubernetes
-    /// `LabelSelector` semantics (`matchLabels` + `matchExpressions`).
-    pub node_selector: Option<LabelSelector>,
+    /// Optional list of label selectors for excluding nodes from the capacity
+    /// aggregate (spec-007). A node matching ANY selector is excluded. Each
+    /// selector internally ANDs its matchLabels/matchExpressions (standard K8s
+    /// semantics); the list-level result is OR. When absent or empty, only
+    /// unschedulable nodes (`spec.unschedulable = true`) are excluded (FR-005).
+    pub node_selectors: Option<Vec<LabelSelector>>,
 }
 
 /// Status of the ClusterCapacity CRD, populated by the Node Capacity Controller.
@@ -50,7 +50,7 @@ pub struct ClusterCapacityStatus {
     pub excluded_node_count: i32,
     /// Nodes excluded because `spec.unschedulable = true`.
     pub excluded_by_unschedulable: i32,
-    /// Nodes excluded because they matched `spec.nodeSelector`.
+    /// Nodes excluded because they matched `spec.nodeSelectors`.
     pub excluded_by_selector: i32,
 }
 
@@ -91,7 +91,7 @@ mod tests {
         let cc = ClusterCapacity::new(
             CLUSTER_CAPACITY_NAME,
             ClusterCapacitySpec {
-                node_selector: None,
+                node_selectors: None,
             },
         );
         assert_eq!(cc.metadata.name.as_deref(), Some(CLUSTER_CAPACITY_NAME));
@@ -115,44 +115,52 @@ mod tests {
         assert!(json.get("lastUpdated").is_some());
     }
 
-    // ---- spec-006: node_selector + exclusion observability fields ----
+    // ---- spec-007: node_selectors (array) + exclusion observability fields ----
 
     #[test]
-    fn node_selector_field_serialises_camel_case_and_round_trips() {
+    fn node_selectors_field_serialises_camel_case_and_round_trips() {
         use super::LabelSelector;
         use std::collections::BTreeMap;
 
-        // A spec carrying a selector that excludes control-plane nodes.
+        // A spec carrying a list of one selector that excludes control-plane nodes.
         let mut match_labels = BTreeMap::new();
         match_labels.insert(
             "node-role.kubernetes.io/control-plane".to_string(),
             String::new(),
         );
         let spec = ClusterCapacitySpec {
-            node_selector: Some(LabelSelector {
+            node_selectors: Some(vec![LabelSelector {
                 match_labels: Some(match_labels),
                 match_expressions: None,
-            }),
+            }]),
         };
         let json = serde_json::to_value(&spec).unwrap();
+        let node_selectors = json
+            .get("nodeSelectors")
+            .expect("field must serialise as camelCase `nodeSelectors`: {json}");
         assert!(
-            json.get("nodeSelector").is_some(),
-            "field must serialise as camelCase `nodeSelector`: {json}"
+            node_selectors.is_array(),
+            "nodeSelectors must serialise as an array: {json}"
+        );
+        assert_eq!(
+            node_selectors.as_array().unwrap().len(),
+            1,
+            "one selector in the list"
         );
         // Round-trips back through serde.
         let back: ClusterCapacitySpec = serde_json::from_value(json).unwrap();
         assert!(
-            back.node_selector.is_some(),
-            "nodeSelector round-trips through serde"
+            back.node_selectors.is_some(),
+            "nodeSelectors round-trips through serde"
         );
     }
 
     #[test]
-    fn node_selector_defaults_to_none_when_absent() {
-        // Backward compatibility: an existing instance without nodeSelector
-        // deserialises to None (the field is optional, FR-005).
+    fn node_selectors_defaults_to_none_when_absent() {
+        // An existing instance without nodeSelectors deserialises to None
+        // (the field is optional, FR-005).
         let spec: ClusterCapacitySpec = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(spec.node_selector.is_none());
+        assert!(spec.node_selectors.is_none());
     }
 
     #[test]
@@ -186,29 +194,29 @@ mod tests {
     }
 
     #[test]
-    fn crd_schema_includes_node_selector_under_spec() {
+    fn crd_schema_includes_node_selectors_under_spec() {
         let crd = ClusterCapacity::crd();
         let v = serde_json::to_value(&crd).unwrap();
-        let node_selector = v
+        let node_selectors = v
             .pointer(
-                "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/nodeSelector",
+                "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/nodeSelectors",
             )
-            .expect("nodeSelector schema present under spec");
+            .expect("nodeSelectors schema present under spec");
         assert_eq!(
-            node_selector.get("type").and_then(|t| t.as_str()),
-            Some("object"),
-            "nodeSelector is an object-typed field"
+            node_selectors.get("type").and_then(|t| t.as_str()),
+            Some("array"),
+            "nodeSelectors is an array-typed field"
         );
-        // Optional: nodeSelector must NOT be in the spec `required` array.
+        // nodeSelectors must NOT be in the spec `required` array (optional, FR-005).
         let required =
             v.pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/required");
         let lists_selector = required.is_some_and(|arr| {
             arr.as_array()
-                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("nodeSelector")))
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("nodeSelectors")))
         });
         assert!(
             !lists_selector,
-            "nodeSelector must be optional, not required (FR-005)"
+            "nodeSelectors must be optional, not required (FR-005)"
         );
     }
 }
