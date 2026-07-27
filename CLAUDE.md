@@ -1,7 +1,7 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/006-schedulable-node-filter/plan.md
+at specs/007-multi-selector-exclusion/plan.md
 <!-- SPECKIT END -->
 
 # Project: emergency-ration-webhook
