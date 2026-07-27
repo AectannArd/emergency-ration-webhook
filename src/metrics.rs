@@ -1,6 +1,6 @@
 //! Prometheus metric definitions and exposition (US2, T027/T029).
 //!
-//! Seven metrics are registered on a single [`Registry`] (data-model.md
+//! Eight metrics are registered on a single [`Registry`] (data-model.md
 //! §Metrics / research.md R10):
 //!
 //! | Metric | Type | Source |
@@ -92,7 +92,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Register all seven metrics on a fresh registry. Panics if a metric fails
+    /// Register all eight metrics on a fresh registry. Panics if a metric fails
     /// to register (a programming error — the names are compile-time constants).
     pub fn new() -> Self {
         let registry = Registry::new();
@@ -184,7 +184,7 @@ impl Metrics {
             .expect("register exemptions");
 
         // CounterVec/GaugeVec emit nothing until a child label-set is created.
-        // Pre-create every expected series so all seven metrics appear in
+        // Pre-create every expected series so all eight metrics appear in
         // /metrics from startup (a scrape must see the full surface at zero,
         // not an empty response before the first decision).
         for resource in [ResourceLabel::Cpu, ResourceLabel::Memory] {
