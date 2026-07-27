@@ -111,3 +111,70 @@ Data flow:
 - Metrics and structured logging must distinguish a dry-run would-deny from a
   real deny and a real allow, so operators can build dashboards that answer
   "what would dry-run block?" without conflating it with enforced denials.
+
+## Session 2026-07-27 (spec-005: on-demand infrastructure verification)
+
+> Produced by `/speckit-clarify` ahead of `/speckit-specify` for the on-demand
+> verification feature — an operator-initiated tool that performs setup → test
+> → teardown against a real Kubernetes cluster and prints a report.
+
+- Q: What form should the on-demand verification deliverable take in the repo?
+  → A: **Dedicated CLI binary** (Option A) — a second binary from the same
+     crate (working name `erw-verify`) that orchestrates setup → test → teardown
+     → report. Operator runs it directly with a kubeconfig path/flag. Chosen
+     over extending the `cargo test -- --ignored` E2E harness (report output is
+     constrained by the test runner) and over a shell script (doesn't carry the
+     project's Rust discipline — typed errors, structured output, testability).
+
+- Q: How should the tool isolate its setup/test/teardown footprint on a real
+  cluster?
+  → A: **Assume a clean/dedicated cluster** (Option A). Install into the default
+     `capacity-admission` namespace, full teardown on exit. The caller guarantees
+     the cluster is throwaway. This matches CI semantics exactly and keeps the
+     tool simple — no namespace-prefixed isolation, no detect-existing-install
+     logic. The throwaway guarantee removes the risk of clobbering a production
+     install. A future `--namespace` override may extend this, but is out of
+     scope for v1.
+
+- Q: How comprehensive should the verification scenario matrix be?
+  → A: **Exhaustive, including active fail-closed simulation** (Option C). The
+     matrix covers: (a) the constitutional verification suite from Option B —
+     budget enforcement (admit/deny + edge cases at 0%/100%), runtime budget
+     adjustment without restart, dry-run mode (admit-with-warning), capacity
+     tracking accuracy (CRD status vs actual node allocatable), metrics/health
+     endpoints; PLUS (b) active fail-closed simulation — killing webhook pods,
+     deleting CRDs, inducing stale capacity data — to verify fail-closed paths
+     fire on real infrastructure. Safe because the throwaway-cluster model
+     (above) makes active degradation non-destructive.
+
+- Q: How should the verification report be printed/output?
+  → A: **Human-readable terminal report (default) + optional JSON via `--json`
+     flag** (Option B). Rich colorized per-scenario PASS/FAIL output by default;
+     `--json` emits structured machine-readable output for CI/tooling
+     consumption. Chosen over plain text only (hard to parse) and always-write-
+     both-to-disk (adds I/O complexity without clear benefit over stdout+flag).
+
+### Design consequences (carried into specify)
+
+- The deliverable is a **new binary target** in `Cargo.toml` (`[[bin]]
+  name = "erw-verify"`), sharing the library crate (`capacity_admission_webhook`)
+  so it can reuse CRD types, config parsing, and any shared test fixtures.
+- The tool consumes a kubeconfig via the standard `KUBECONFIG` env var or a
+  `--kubeconfig` flag (precedence: flag > env > default `~/.kube/config`).
+- Setup reuses the existing `deploy/` manifests (crds, rbac, deployment,
+  webhook-config, cert-setup), applying them against the target cluster via the
+  kube-rs client (not `kubectl`, to keep the single-binary, no-external-deps
+  property). TLS provisioning follows the manual Secret path (self-signed cert
+  generation in-process), not cert-manager — the tool must not assume
+  cert-manager is installed.
+- Teardown deletes everything the tool applied, in reverse dependency order,
+  with a `--keep-on-failure` escape hatch for debugging (default: always tear
+  down, even on failure, so the cluster is left clean).
+- The exhaustive scenario matrix (including active degradation) is safe only
+  because of the throwaway-cluster guarantee. The tool should document this
+  requirement prominently (Principle X) and may refuse to run if it detects a
+  non-empty cluster — this safety check is a plan-phase decision.
+- The report module is pure (no cluster I/O) so it can be unit-tested in
+  isolation (Principle VIII).
+- This feature does NOT amend the constitution — it verifies the existing 12
+  principles hold on real infrastructure. No new principle is needed.
