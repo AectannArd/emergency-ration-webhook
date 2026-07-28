@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.4.0 → 2.5.0 (MINOR — Principle XII added: Scratch Space for Agent Intercommunication)
+Version change: 2.5.0 → 2.6.0 (MINOR — Principle XIII added: Separation of Usage and Contribution Documentation)
+  Prior: 2.4.0 → 2.5.0 (MINOR — Principle XII added: Scratch Space for Agent Intercommunication)
   Prior: 2.3.0 → 2.4.0 (MINOR — Principle XI added: CI-Green Completion Gate)
   Prior: 2.2.0 → 2.3.0 (MINOR — Principle X added: User-Facing Functionality Documented in README.md)
   Prior: 2.1.0 → 2.2.0 (MINOR — Development Workflow expanded: branch-and-PR workflow rule)
@@ -30,6 +31,7 @@ Added principles:
   - v2.3.0: X — User-Facing Functionality Documented in README.md
   - v2.4.0: XI — CI-Green Completion Gate
   - v2.5.0: XII — Scratch Space for Agent Intercommunication
+  - v2.6.0: XIII — Separation of Usage and Contribution Documentation
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -56,6 +58,7 @@ Modified in v2.4.0:
     infrastructure.
 Added sections (cumulative):
   - Core Principles I–XII
+  - Core Principles I–XIII
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -361,6 +364,46 @@ Scratch files are never committed and never shipped.
   `.temp/` closes that gap by making the scratch space explicit, git-ignored,
   and discoverable to every agent that touches the repo.
 
+### XIII. Separation of Usage and Contribution Documentation
+
+The repository maintains two distinct documentation surfaces with
+non-overlapping scope: `README.md` for **usage** (what the software does and
+how to operate it) and `CONTRIBUTING.md` for **contribution** (how to work on
+the repository — building, testing, running real-infrastructure verification,
+and development workflow). A change to one surface MUST NOT silently absorb
+the other's content.
+
+- **`README.md`** — the operator's entry point. Contains: what the webhook
+  does, installation/quickstart, configuration reference (flags, env vars, CRD
+  fields), deployment instructions, admission behaviour, exposed metrics,
+  structured-log keys, and upgrade/deprecation notes. This is Principle X's
+  scope, unchanged.
+- **`CONTRIBUTING.md`** — the contributor's entry point. Contains: how to clone
+  and set up the development environment, how to build (including container
+  images), how to run the test suite (unit, integration, BDD, E2E), how to run
+  the on-demand verification tool (`erw-verify`) against a real cluster,
+  development workflow (spec-driven, dual-agent split, branch-and-PR), code
+  style and formatting rules, and how to submit changes.
+- **Non-overlap rule**: if a piece of documentation is about *using* the
+  deployed software (an operator reading it to run/configure the webhook), it
+  belongs in `README.md`. If it is about *working on the repository* (a
+  developer reading it to build, test, or contribute), it belongs in
+  `CONTRIBUTING.md`. The README MAY link to `CONTRIBUTING.md` for contributor
+  concerns, but MUST NOT duplicate contributor content inline.
+- **Mandatory `CONTRIBUTING.md`**: every repository MUST have a
+  `CONTRIBUTING.md` at the root. A change that adds or alters contribution
+  workflow (build steps, test commands, verification tooling, development
+  process) MUST update `CONTRIBUTING.md` in the same change — the same
+  standard as the README rule (Principle X) and the test-first rule (Principle
+  VIII).
+- Rationale: mixing usage and contribution docs in a single README creates a
+  wall of text that serves neither audience — operators wade through build
+  commands they don't need, while contributors hunt for test instructions
+  buried after deployment sections. Separating the surfaces makes each
+  document focused and scannable. This became necessary when the spec-009
+  image-build automation added substantial build/test/verify documentation that
+  belongs in the contributor's guide, not in the operator's README.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -429,12 +472,12 @@ Scratch files are never committed and never shipped.
 - **Documentation as a deliverable**: every user-facing capability (flags, env
   vars, admission behaviour, CRD spec/status fields, metrics, log keys,
   deployment, upgrade notes) MUST be documented in `README.md` (Principle X).
-  README is the single entry point; deeper material MAY live in `docs/` but the
-  README MUST cover the essentials and link to it. A change that adds or alters
-  user-facing functionality MUST update `README.md` in the same change — a PR
-  shipping user-facing behaviour without a README delta is incomplete and
-  blocked at review, on the same footing as the test-first (Principle VIII) and
-  formatting (Principle IX) rules.
+  Every contribution-workflow capability (build steps, test commands,
+  verification tooling, development process) MUST be documented in
+  `CONTRIBUTING.md` (Principle XIII). Both are first-class deliverables updated
+  in the same change — a PR shipping functionality without the matching doc
+  delta is incomplete and blocked at review, on the same footing as the
+  test-first (Principle VIII) and formatting (Principle IX) rules.
 - **CI-green completion gate**: a task or feature is not complete until CI
   passes on the merge branch — all jobs, not just the Rust quality gate
   (Principle XI). A pre-existing infrastructure failure on `main` MUST be
@@ -470,4 +513,4 @@ Scratch files are never committed and never shipped.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.5.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-27
+**Version**: 2.6.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-28
