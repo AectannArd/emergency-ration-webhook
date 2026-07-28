@@ -14,7 +14,7 @@
 
 use std::time::{Duration, Instant};
 
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Endpoints, Pod};
 use kube::Client;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams};
 
@@ -30,6 +30,12 @@ use super::{ScenarioGroup, ScenarioResult, ScenarioStatus};
 const NAMESPACE: &str = "capacity-admission";
 /// Label selector matching every webhook pod (the Deployment's replica set).
 const APP_LABEL: &str = "app=capacity-admission-webhook";
+/// Name of the webhook `Service` whose `Endpoints` gate restore readiness
+/// (spec-010). Matches the Service name in `deploy/deployment.yaml`. After S9
+/// kills the pods the Endpoints controller has a propagation delay; restore must
+/// wait for ≥1 ready address so the apiserver can forward S10's probe instead of
+/// failing closed with "no endpoints available" (S9's failure mode).
+const SERVICE_NAME: &str = "capacity-admission-webhook";
 /// Freshness threshold the webhook enforces. Matches the
 /// `--capacity-freshness-timeout-secs=30` arg in `deploy/deployment.yaml`, which
 /// is the manifest the verify tool applies — so within a run this is exact.
@@ -303,37 +309,52 @@ async fn backdate_last_updated(api: &Api<Allocation>) -> Result<(), String> {
     .map_err(|e| format!("backdating Allocation lastUpdated: {e}"))
 }
 
-/// Wait for the webhook to return to a healthy baseline (≥1 pod Ready + non-zero
-/// Allocation ceiling) after a scenario induced degradation. Self-contained
-/// (mirrors `setup::wait_for_readiness`) so this module compiles both inside the
-/// binary and `#[path]`-included by the report unit tests. Best-effort.
+/// Wait for the webhook to return to a healthy baseline after a scenario induced
+/// degradation: ≥1 pod Ready + non-zero Allocation ceiling + the webhook Service
+/// has at least one ready endpoint (spec-010). Self-contained (mirrors
+/// `setup::wait_for_readiness`) so this module compiles both inside the binary
+/// and `#[path]`-included by the report unit tests. Best-effort.
 async fn restore_readiness(client: &Client) {
     if let Err(e) = wait_for_readiness(client, RESTORE_TIMEOUT).await {
         tracing::warn!(
             error = %e,
-            "degradation restore: webhook did not return to Ready + non-zero ceiling"
+            "degradation restore: webhook did not return to Ready + non-zero ceiling + ready endpoints"
         );
     }
 }
 
-/// Poll until at least one webhook pod is `Running` with ready containers, then
-/// until the Allocation `ceilingCpuMilli` is non-zero again (supply repopulated).
+/// Poll until the webhook has returned to a healthy baseline after a scenario
+/// induced degradation: ≥1 pod `Running` with ready containers, the Allocation
+/// `ceilingCpuMilli` non-zero again (supply repopulated), AND the webhook
+/// `Service` has at least one ready endpoint (spec-010). The endpoint check
+/// covers the Endpoints-controller propagation delay after S9 kills the pods, so
+/// S10's first probe is forwarded to the webhook instead of failing closed with
+/// "no endpoints available" (S9's failure mode).
 async fn wait_for_readiness(client: &Client, timeout: Duration) -> Result<(), String> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), NAMESPACE);
     let lp = ListParams::default().labels(APP_LABEL);
     let allocs: Api<Allocation> = Api::all(client.clone());
+    let endpoints: Api<Endpoints> = Api::namespaced(client.clone(), NAMESPACE);
 
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() >= deadline {
-            return Err("webhook did not return to Ready + non-zero ceiling".into());
+            return Err(
+                "webhook did not return to Ready + non-zero ceiling + ready endpoints".into(),
+            );
         }
         let pods_ready = pods
             .list(&lp)
             .await
             .map(|list| list.items.iter().any(pod_ready))
             .unwrap_or(false);
+        let endpoints_ready = endpoints
+            .get(SERVICE_NAME)
+            .await
+            .map(|ep| endpoints_populated(&ep))
+            .unwrap_or(false);
         if pods_ready
+            && endpoints_ready
             && let Ok(allocation) = allocs.get(CLUSTER_ALLOCATION_NAME).await
             && let Some(status) = &allocation.status
             && status.ceiling_cpu_milli > 0
@@ -358,6 +379,25 @@ fn pod_ready(pod: &Pod) -> bool {
     running && containers_ready
 }
 
+/// Whether the webhook `Service`'s [`Endpoints`] object lists at least one ready
+/// backing address — i.e. the apiserver can forward an admission call to the
+/// webhook rather than failing closed with "no endpoints available". The
+/// Endpoints controller splits backing pods into `addresses` (ready) and
+/// `not_ready_addresses`; only `addresses` make the Service routable.
+///
+/// Pure so it is unit-tested directly; the live apiserver fetch lives in
+/// [`wait_for_readiness`].
+fn endpoints_populated(ep: &Endpoints) -> bool {
+    let Some(subsets) = ep.subsets.as_ref() else {
+        return false;
+    };
+    subsets
+        .iter()
+        .flat_map(|s| s.addresses.as_deref().unwrap_or(&[]))
+        .next()
+        .is_some()
+}
+
 /// Wait for the Allocation Controller to rewrite a fresh `lastUpdated` (age at or
 /// below the freshness threshold). The controller recomputes on a ~2s tick, so
 /// this resolves within a few seconds.
@@ -377,5 +417,101 @@ async fn wait_for_fresh_last_updated(api: &Api<Allocation>) -> Result<(), String
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure readiness/classification helpers (Constitution
+    //! Principle VIII). The async restore logic is covered by running the
+    //! degradation suite against a real cluster (Principle VI).
+
+    use super::endpoints_populated;
+    use k8s_openapi::api::core::v1::{EndpointAddress, EndpointSubset, Endpoints};
+
+    /// Build a ready backing address with just an IP (the only field that matters
+    /// for the populated check).
+    fn addr(ip: &str) -> EndpointAddress {
+        EndpointAddress {
+            ip: ip.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Build an `Endpoints` object carrying the given subsets.
+    fn endpoints_with(subsets: Vec<EndpointSubset>) -> Endpoints {
+        Endpoints {
+            subsets: Some(subsets),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_subsets_is_not_ready() {
+        // Endpoints object exists but the controller has populated no subsets —
+        // the Service has no backing pods yet.
+        assert!(!endpoints_populated(&Endpoints::default()));
+    }
+
+    #[test]
+    fn empty_subsets_list_is_not_ready() {
+        assert!(!endpoints_populated(&endpoints_with(vec![])));
+    }
+
+    #[test]
+    fn subset_without_addresses_is_not_ready() {
+        let subset = EndpointSubset {
+            addresses: None,
+            ..Default::default()
+        };
+        assert!(!endpoints_populated(&endpoints_with(vec![subset])));
+    }
+
+    #[test]
+    fn subset_with_empty_addresses_is_not_ready() {
+        let subset = EndpointSubset {
+            addresses: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(!endpoints_populated(&endpoints_with(vec![subset])));
+    }
+
+    #[test]
+    fn subset_with_one_address_is_ready() {
+        // The restore-success case: at least one pod is a ready backing address,
+        // so the apiserver can forward admission calls to the webhook.
+        let subset = EndpointSubset {
+            addresses: Some(vec![addr("10.244.0.5")]),
+            ..Default::default()
+        };
+        assert!(endpoints_populated(&endpoints_with(vec![subset])));
+    }
+
+    #[test]
+    fn not_ready_addresses_do_not_count() {
+        // The Endpoints controller separates ready pods (`addresses`) from
+        // not-yet-ready pods (`not_ready_addresses`). Only ready addresses make
+        // the Service routable — a not_ready-only set must NOT pass readiness.
+        let subset = EndpointSubset {
+            addresses: Some(vec![]),
+            not_ready_addresses: Some(vec![addr("10.244.0.6")]),
+            ..Default::default()
+        };
+        assert!(!endpoints_populated(&endpoints_with(vec![subset])));
+    }
+
+    #[test]
+    fn ready_address_in_second_subset_counts() {
+        // Multiple subsets (e.g. one per port); a ready address in any of them
+        // satisfies readiness.
+        let empty = EndpointSubset {
+            addresses: Some(vec![]),
+            ..Default::default()
+        };
+        let ready = EndpointSubset {
+            addresses: Some(vec![addr("10.244.0.7")]),
+            ..Default::default()
+        };
+        assert!(endpoints_populated(&endpoints_with(vec![empty, ready])));
     }
 }
