@@ -11,9 +11,11 @@ that would push a resource past its budget. Once it is installed, no pod in a
 monitored namespace can be created or updated without first passing the budget
 check.
 
-This README is the single entry point for installing, configuring, operating, and
-troubleshooting the webhook. Deeper design material (full 3-component
-architecture, CRD data-model, admission contracts) lives under
+This README is the entry point for installing, configuring, operating, and
+troubleshooting the webhook. Contributors should also see
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for build, test, and development workflow.
+Deeper design material (full 3-component architecture, CRD data-model, admission
+contracts) lives under
 [`specs/001-capacity-admission-webhook/`](./specs/001-capacity-admission-webhook/)
 and is linked where relevant — but everything an operator needs day-to-day is
 here.
@@ -62,24 +64,11 @@ webhook in a Kubernetes cluster.
   installed in the cluster. Without it, use the manual Secret path in
   [TLS Provisioning](#tls-provisioning).
 
-### Build the Image
-
-The [`Dockerfile`](./Dockerfile) is a multi-stage build (Rust 1.89 builder on a
-distroless runtime base):
-
-```sh
-docker build -t capacity-admission-webhook:latest .
-```
-
-Push the image to a registry your cluster can reach (or load it locally for a
-`kind`/`k3d` cluster), then update the `image:` field in
-[`deploy/deployment.yaml`](./deploy/deployment.yaml) to point at it.
-
-> **Air-gapped / offline clusters**: `deploy/deployment.yaml` sets
-> `imagePullPolicy: IfNotPresent`, so the image must already be present in the
-> cluster (in a registry or loaded locally) before the Deployment goes healthy.
-
 ### Deploy to Kubernetes
+
+**Prerequisites**: a container image available to the cluster. See
+[Building](./CONTRIBUTING.md#building) in the contributor guide for `docker build`
+and registry instructions.
 
 Apply the manifests in [`deploy/`](./deploy/). The order below ensures the
 `capacity-admission` namespace exists before the namespaced resources, and that
@@ -798,25 +787,9 @@ cluster — only the webhook Deployment is (via the applied manifests).
 > run if the `default` namespace contains any pods. Only run it against a cluster
 > you are willing to throw away.
 
-### Build
-
-```sh
-cargo build --bin erw-verify --release   # binary at target/release/erw-verify
-```
-
-The binary embeds the `deploy/*.yaml` manifests at compile time via `include_str!`,
-so it applies the exact manifests from the repository — no external files at
-runtime. The target cluster must be able to pull the webhook image
-(`capacity-admission-webhook:latest` by default); for a `kind` cluster, build and
-load it first:
-
-```sh
-docker build -t capacity-admission-webhook:latest .
-kind load docker-image capacity-admission-webhook:latest --name <your-cluster>
-```
-
-For a remote registry, point `deploy/deployment.yaml` at your image and rebuild
-`erw-verify` before running.
+For build instructions, see
+[Verification Tool (`erw-verify`)](./CONTRIBUTING.md#verification-tool-erw-verify)
+in the contributor guide.
 
 ### Usage
 
@@ -878,76 +851,8 @@ induce stale capacity data) are planned for a follow-up phase (US2); see
 
 ## Development
 
-### Build
-
-```sh
-cargo build               # debug build
-cargo build --release     # release build (what the Dockerfile / CI produce)
-```
-
-The MSRV is **1.89** (edition 2024), recorded in [`Cargo.toml`](./Cargo.toml).
-
-### Tests
-
-```sh
-cargo test                            # unit + integration + BDD + verify (mocked apiserver)
-cargo test -- --ignored               # end-to-end tests (need a live k3d/kind cluster)
-```
-
-Unit and integration tests use a `tower-test`-mocked API server; BDD scenarios
-run via `cucumber-rs` under `tests/bdd/`. The `erw-verify` tool's pure modules
-(report rendering, CLI arg parsing) have unit tests under `tests/verify/` that run
-with no cluster. E2E tests are marked `#[ignore]` so a plain `cargo test` does not
-require a cluster; `erw-verify`'s scenarios are themselves integration tests that
-run against a real cluster (see [On-Demand Verification](#on-demand-verification-erw-verify)).
-
-### Quality Gate
-
-Before merge, all of the following must be green (the same gate CI enforces in
-[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)):
-
-```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-`README.md` (and every other file) must also comply with
-[`.editorconfig`](./.editorconfig) — enforced by CI's `editorconfig` job.
-
-### Project Structure
-
-```text
-src/
-├── main.rs              # binary entry point: wires the 3 components, binds HTTPS + HTTP servers
-├── lib.rs               # crate facade (re-exports modules for tests)
-├── config.rs            # CLI flag / env-var parsing and precedence
-├── metrics.rs           # the 8 Prometheus metrics on one registry
-├── time_util.rs         # RFC 3339 parsing / formatting
-├── crd/
-│   ├── allocation.rs        # Allocation CRD (spec.budgetPercent + status)
-│   └── cluster_capacity.rs  # ClusterCapacity CRD (status only)
-├── controllers/
-│   ├── node_capacity.rs     # supply side: nodes → ClusterCapacity status
-│   ├── node_filter.rs       # spec-006: node-exclusion filter (unschedulable + label selector)
-│   └── allocation.rs        # demand side: pods + supply → Allocation status
-├── resources/
-│   └── quantity.rs          # Kubernetes resource-quantity parsing (cpu→milli, memory→bytes)
-└── webhook/
-    ├── handler.rs           # axum routes (/validate, /metrics, /healthz), decision orchestration, logging
-    ├── admission.rs         # pure budget check (inclusive ceiling)
-    └── error.rs             # fail-closed error → AdmissionResponse mapping, rejection messages
-src/bin/erw-verify/          # on-demand verification tool (spec-005): separate binary
-├── main.rs                  # orchestration + exit codes
-├── args.rs                  # CLI flag / env-var parsing
-├── client.rs                # kube::Client from kubeconfig
-├── setup.rs                 # apply manifests, self-signed TLS cert (rcgen), caBundle, readiness, pre-flight
-├── teardown.rs              # reverse-order deletion
-├── report.rs                # pure human/JSON report rendering
-└── scenarios/               # enforcement scenarios S1-S8 (degradation S9-S11, later)
-deploy/                      # Kubernetes manifests (crds, rbac, deployment, webhook-config, cert-setup)
-tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs) + verify (unit)
-```
+For build instructions, running tests, the quality gate, code style rules, and
+the project structure, see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
