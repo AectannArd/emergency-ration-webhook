@@ -102,10 +102,11 @@ jobs:
           kubectl -n capacity-admission create secret tls capacity-admission-webhook-tls \
             --cert=tls.crt --key=tls.key
 
-          # Patch the image to the kind-loaded tag BEFORE applying the
-          # Deployment, so pods are created with the correct image from the
-          # start (avoids ImagePullBackOff on :latest).
-          sed 's|image: capacity-admission-webhook:latest|image: capacity-admission-webhook:e2e|' \
+          # Patch the image placeholder to the kind-loaded tag BEFORE applying
+          # the Deployment, so pods are created with the correct image from the
+          # start (avoids ImagePullBackOff on :latest). spec-009 changed the
+          # manifest from a bare image name to ERW_IMAGE_PLACEHOLDER.
+          sed 's|image: ERW_IMAGE_PLACEHOLDER|image: capacity-admission-webhook:e2e|' \
             deploy/deployment.yaml | kubectl apply -f -
 
           CABUNDLE="$(base64 -w0 tls.crt)"
