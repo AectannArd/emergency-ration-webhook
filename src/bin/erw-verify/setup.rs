@@ -94,8 +94,24 @@ pub async fn check_cluster_clean(client: &Client) -> Result<()> {
 
 /// Apply all embedded `deploy/*.yaml` manifests in CI dependency order:
 /// namespace → RBAC → CRDs → Deployment/Service → webhook-config.
-pub async fn apply_manifests(client: &Client) -> Result<()> {
-    let deployment_docs = parse_docs(DEPLOYMENT)?;
+///
+/// When `image` is `Some`, the resolved fully-qualified image reference is
+/// substituted into every Deployment's first container before it is applied
+/// (spec-009, FR-007) — overriding the `ERW_IMAGE_PLACEHOLDER` in
+/// `deploy/deployment.yaml`. `None` (`--skip-build` with no registry) leaves the
+/// placeholder as-is (research R3).
+pub async fn apply_manifests(client: &Client, image: Option<&str>) -> Result<()> {
+    let mut deployment_docs = parse_docs(DEPLOYMENT)?;
+    // Substitute the resolved image into each Deployment up front, before the
+    // immutable borrows below apply the (now-mutated) documents.
+    if let Some(image_ref) = image {
+        for doc in deployment_docs
+            .iter_mut()
+            .filter(|d| kind_is(d, "Deployment"))
+        {
+            substitute_image(doc, image_ref);
+        }
+    }
     let rbac_docs = parse_docs(RBAC)?;
     let crd_docs = parse_docs(CRDS)?;
     let webhook_docs = parse_docs(WEBHOOK_CONFIG)?;
@@ -216,6 +232,26 @@ fn parse_docs(manifest: &str) -> Result<Vec<serde_json::Value>> {
 
 fn kind_is(doc: &serde_json::Value, kind: &str) -> bool {
     doc.get("kind").and_then(|v| v.as_str()) == Some(kind)
+}
+
+/// Set `spec.template.spec.containers[0].image` on a Deployment doc to the
+/// resolved fully-qualified image reference (research R3: a targeted JSON walk on
+/// the parsed value, not a fragile raw-YAML text substitution). A no-op (no
+/// panic) if the expected path is absent — the substitution only fires for
+/// well-formed Deployment documents.
+fn substitute_image(doc: &mut serde_json::Value, image: &str) {
+    let Some(containers) = doc
+        .get_mut("spec")
+        .and_then(|s| s.get_mut("template"))
+        .and_then(|t| t.get_mut("spec"))
+        .and_then(|s| s.get_mut("containers"))
+        .and_then(|c| c.as_array_mut())
+    else {
+        return;
+    };
+    if let Some(first) = containers.get_mut(0) {
+        first["image"] = serde_json::Value::String(image.to_string());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,3 +425,95 @@ fn pod_ready(pod: &Pod) -> bool {
 
 // ByteString lives at the k8s_openapi root.
 use k8s_openapi::ByteString;
+
+#[cfg(test)]
+mod tests {
+    use super::substitute_image;
+
+    fn deployment_doc(image: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": { "name": "capacity-admission-webhook" },
+            "spec": {
+                "replicas": 2,
+                "template": {
+                    "spec": {
+                        "containers": [
+                            { "name": "webhook", "image": image }
+                        ]
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn substitute_image_replaces_first_container_image() {
+        let mut doc = deployment_doc("ERW_IMAGE_PLACEHOLDER");
+        substitute_image(&mut doc, "cr.yandex/abc/capacity-admission-webhook:latest");
+        let image = doc["spec"]["template"]["spec"]["containers"][0]["image"]
+            .as_str()
+            .unwrap();
+        assert_eq!(image, "cr.yandex/abc/capacity-admission-webhook:latest");
+    }
+
+    #[test]
+    fn substitute_image_leaves_unrelated_fields_intact() {
+        let mut doc = deployment_doc("old:tag");
+        substitute_image(&mut doc, "new:tag");
+        // replicas + container name untouched; only the image moved.
+        assert_eq!(doc["spec"]["replicas"], 2);
+        assert_eq!(
+            doc["spec"]["template"]["spec"]["containers"][0]["name"],
+            "webhook"
+        );
+        assert_eq!(
+            doc["spec"]["template"]["spec"]["containers"][0]["image"],
+            "new:tag"
+        );
+    }
+
+    #[test]
+    fn substitute_image_targets_only_the_first_container() {
+        let mut doc = serde_json::json!({
+            "kind": "Deployment",
+            "spec": { "template": { "spec": { "containers": [
+                { "name": "a", "image": "first" },
+                { "name": "b", "image": "second" }
+            ] } } }
+        });
+        substitute_image(&mut doc, "replaced:tag");
+        let containers = doc["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(containers[0]["image"], "replaced:tag");
+        assert_eq!(
+            containers[1]["image"], "second",
+            "second container untouched"
+        );
+    }
+
+    #[test]
+    fn substitute_image_no_op_when_container_path_absent() {
+        // A doc missing the expected path is left unchanged (no panic).
+        let mut doc = serde_json::json!({ "kind": "Deployment", "spec": {} });
+        substitute_image(&mut doc, "ignored:tag");
+        assert_eq!(doc["spec"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn substitute_image_no_op_when_containers_empty() {
+        let mut doc = serde_json::json!({
+            "kind": "Deployment",
+            "spec": { "template": { "spec": { "containers": [] } } }
+        });
+        substitute_image(&mut doc, "ignored:tag");
+        assert!(
+            doc["spec"]["template"]["spec"]["containers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
