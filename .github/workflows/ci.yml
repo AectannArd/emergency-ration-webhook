@@ -106,7 +106,10 @@ jobs:
           # the Deployment, so pods are created with the correct image from the
           # start (avoids ImagePullBackOff on :latest). spec-009 changed the
           # manifest from a bare image name to ERW_IMAGE_PLACEHOLDER.
-          sed 's|image: ERW_IMAGE_PLACEHOLDER|image: capacity-admission-webhook:e2e|' \
+          # Also set imagePullPolicy: IfNotPresent — kind loads the image
+          # locally; Always would try to pull from a registry (ImagePullBackOff).
+          sed -e 's|image: ERW_IMAGE_PLACEHOLDER|image: capacity-admission-webhook:e2e|' \
+              -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
             deploy/deployment.yaml | kubectl apply -f -
 
           CABUNDLE="$(base64 -w0 tls.crt)"
