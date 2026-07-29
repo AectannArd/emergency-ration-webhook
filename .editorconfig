@@ -63,6 +63,10 @@ max_line_length = 100
 [*.feature]
 indent_size = 2
 
+# ---- dotenv (.env) config files: flat KEY=VALUE (spec-009) ----
+[{.env,.env.*,*.env}]
+indent_size = 2
+
 # ---- Dockerfile: container image for the webhook Deployment ----
 [{Dockerfile,*.containerfile,*.dockerfile}]
 indent_size = 4

@@ -41,9 +41,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: webhook
-          # Build locally (see Dockerfile) and push to your registry, then update:
-          image: capacity-admission-webhook:latest
-          imagePullPolicy: IfNotPresent
+          # ERW_IMAGE_PLACEHOLDER is replaced at apply time by `erw-verify` with
+          # the resolved fully-qualified image reference from .env (spec-009,
+          # research R3). For a manual `kubectl apply`, replace this with your own
+          # image reference (e.g. cr.yandex/<id>/capacity-admission-webhook:latest).
+          image: ERW_IMAGE_PLACEHOLDER
+          # Images come from a remote registry when deployed via `erw-verify`, so
+          # always check the registry for the current tag.
+          imagePullPolicy: Always
           args:
             - --port=8443
             - --metrics-port=9090
