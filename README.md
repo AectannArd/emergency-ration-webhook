@@ -1000,5 +1000,4 @@ tests/                       # integration (tower-test mocked apiserver) + BDD (
 
 ## License
 
-Licensed under **Apache-2.0** (see the `license` field in
-[`Cargo.toml`](./Cargo.toml)).
+Licensed under **Apache-2.0** — see [`LICENSE`](./LICENSE).
