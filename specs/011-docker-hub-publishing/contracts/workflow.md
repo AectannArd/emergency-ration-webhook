@@ -47,14 +47,17 @@ job). The `publish` job depends on this passing.
 images: aectann/emergency-ration-webhook
 tags: |
   type=ref,event=tag
-  type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+  type=raw,value=latest,enable=${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
   type=raw,value=${{ inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
+  type=sha,format=short,enable=${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
 ```
 
-- On tag push: emits the tag name + `latest` (if stable).
+- On tag push: emits the tag name + `latest` (if stable). The `latest` rule is
+  gated on `github.event_name == 'push'` so a manual dispatch never updates
+  `latest` (it is reserved for stable git-tag releases only).
 - On manual dispatch with `image_tag`: emits the input value.
-- On manual dispatch without input: emits nothing extra (the short SHA is
-  handled by a `type=sha` entry — see note below).
+- On manual dispatch without `image_tag`: emits `sha-<short>` as the fallback
+  tag (via `type=sha,format=short`).
 
 ## Caching
 
