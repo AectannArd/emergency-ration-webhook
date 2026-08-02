@@ -55,12 +55,37 @@ webhook in a Kubernetes cluster.
 - A container runtime that can build an image and get it into the cluster:
   - **Build from source**: the Rust toolchain (MSRV **1.89**), and `docker` to
     build the image, **or**
-  - **Pre-built image**: an image in a registry the cluster can pull (no build
-    step required — skip [Build the Image](#build-the-image) and point
-    `deploy/deployment.yaml` at your image)
+  - **Pre-built image**: pull the published image from Docker Hub — no build
+    step required (see [Published Image](#published-image); skip
+    [Build the Image](#build-the-image))
 - For automated TLS (recommended): [cert-manager](https://cert-manager.io/)
   installed in the cluster. Without it, use the manual Secret path in
   [TLS Provisioning](#tls-provisioning).
+
+### Published Image
+
+A pre-built, multi-arch image is published to Docker Hub on every release tag,
+so you can skip [Build the Image](#build-the-image) and pull directly. The image
+supports **linux/amd64** and **linux/arm64** — `docker pull` selects the correct
+variant for your host automatically:
+
+```sh
+docker pull aectann/emergency-ration-webhook:v1.0.0   # a specific release
+docker pull aectann/emergency-ration-webhook:latest   # the latest stable release
+```
+
+To deploy it, replace the `ERW_IMAGE_PLACEHOLDER` token in the `image:` field of
+[`deploy/deployment.yaml`](./deploy/deployment.yaml) with the reference above
+(e.g. `aectann/emergency-ration-webhook:v1.0.0`). The `erw-verify` tool performs
+this substitution automatically from `.env` — see
+[On-Demand Verification](#on-demand-verification-erw-verify).
+
+**Tag conventions** (releases are cut by pushing a git tag — see
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) under *Publishing / Releases*):
+
+- `vX.Y.Z` (e.g. `v1.0.0`) — a stable release. Also updates `latest`.
+- `vX.Y.Z-rc.N` / `vX.Y.Z-beta.N` (e.g. `v1.0.0-rc.1`) — a pre-release. **Does
+  not** update `latest`, so `latest` always tracks the newest stable image.
 
 ### Build the Image
 

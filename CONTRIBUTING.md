@@ -176,3 +176,51 @@ tests/                       # integration (tower-test mocked apiserver) + BDD (
 4. Update documentation in the same PR:
    - Operator-facing changes → [`README.md`](./README.md)
    - Contributor/workflow changes → this file (`CONTRIBUTING.md`)
+
+## Publishing / Releases
+
+Container images are published to Docker Hub automatically — there is no manual
+build-and-push step. A release is cut by pushing a semantic-version git tag:
+
+```sh
+git tag v1.0.0          # stable release
+git tag v1.0.0-rc.1     # pre-release (release candidate)
+git push origin v1.0.0
+```
+
+The tag push triggers [`.github/workflows/publish.yml`](./.github/workflows/publish.yml),
+which re-runs the [Quality Gate](#quality-gate) (so a red gate blocks publishing),
+builds the image for **linux/amd64** and **linux/arm64** from the repository's
+[`Dockerfile`](./Dockerfile) (unchanged), and pushes a single multi-arch manifest
+to `aectann/emergency-ration-webhook` on Docker Hub.
+
+- **Stable tags** (`vX.Y.Z`, no hyphen) also update the moving `latest` tag.
+- **Pre-release tags** (`vX.Y.Z-rc.N`, `vX.Y.Z-beta.N`) publish only the explicit
+  version tag — they do **not** touch `latest`.
+- **Non-semver tags** (e.g. `v1.0`, `release-1`) match neither tag filter and do
+  not trigger a publish.
+
+The workflow is gated on the canonical repository
+(`AectannArd/emergency-ration-webhook`), so a tag pushed on a fork is a no-op.
+
+### Required secrets
+
+Publishing authenticates to Docker Hub via two repository secrets — configure
+them under **Settings → Secrets and variables → Actions**:
+
+| Secret | Value |
+|--------|-------|
+| `DOCKERHUB_USERNAME` | Docker Hub account with push access to `aectann/emergency-ration-webhook` |
+| `DOCKERHUB_TOKEN` | A Docker Hub access token (not the account password) |
+
+If either secret is missing, the workflow fails fast with an `::error::` naming
+the missing secret. The full secret contract (token scoping, rotation,
+verification) is in
+[`specs/011-docker-hub-publishing/contracts/secrets.md`](./specs/011-docker-hub-publishing/contracts/secrets.md).
+
+### Manual dispatch
+
+A maintainer can re-publish without creating a git tag via **Actions → "Publish
+to Docker Hub" → Run workflow**, optionally passing an `image_tag` input (e.g.
+`nightly`) to publish under that tag. The full design (triggers, tag derivation,
+caching) is in [`specs/011-docker-hub-publishing/`](./specs/011-docker-hub-publishing/).
