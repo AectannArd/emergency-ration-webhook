@@ -40,5 +40,21 @@ surface it as a question rather than inventing scope.
 
 ### Script type
 
-Spec Kit scripts in this repo are **bash** (`--script sh`). Run them from the
-project root with `bash .specify/scripts/bash/...`.
+Spec Kit scripts in this repo are **bash** (`--script sh`). Run them from
+the project root with `bash .specify/scripts/bash/...`.
+
+## Repository Mirroring (GitHub → GitVerse)
+
+**GitHub (`origin`) is the primary upstream.** All development, PRs, CI, and
+code review happen on GitHub. **GitVerse is a read-only mirror** that must be
+kept in sync with every `main` update.
+
+After **every** change that lands on `main` — PR merge, direct push, or
+fast-forward — the `main` branch must also be pushed to GitVerse:
+
+```bash
+git push gitverse main
+```
+
+If the clone has dual push URLs configured on `origin`, a single
+`git push origin main` handles both automatically.

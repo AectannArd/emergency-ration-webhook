@@ -56,5 +56,38 @@ implementation.
 
 ### Script type
 
-Spec Kit scripts in this repo are **bash** (`--script sh`). Run them from the
-project root with `bash .specify/scripts/bash/...` on any POSIX machine.
+Spec Kit scripts in this repo are **bash** (`--script sh`). Run them from
+the project root with `bash .specify/scripts/bash/...` on any POSIX machine.
+
+## Repository Mirroring (GitHub → GitVerse)
+
+**GitHub (`origin`) is the primary upstream.** All development, PRs, CI, and
+code review happen on GitHub. **GitVerse (`gitverse`) is a read-only mirror**
+that must be kept in sync with every `main` update.
+
+### Rule
+
+After **every** change that lands on `main` — merge of a PR, a direct push, or
+a fast-forward — the `main` branch must also be pushed to GitVerse.
+
+```bash
+git push gitverse main
+```
+
+### Automation (dual push URLs)
+
+Clones may configure `origin` to push to both upstreams automatically:
+
+```bash
+git remote set-url --add --push origin git@github.com:AectannArd/emergency-ration-webhook.git
+git remote set-url --add --push origin ssh://git@gitverse.ru:2222/AectannArd/emergency-ration-webhook.git
+```
+
+After this, a single `git push origin main` pushes to both. Feature branches
+and spec branches are pushed to GitHub only (GitVerse mirrors `main`).
+
+### GitVerse remote
+
+```
+gitverse  ssh://git@gitverse.ru:2222/AectannArd/emergency-ration-webhook.git
+```
