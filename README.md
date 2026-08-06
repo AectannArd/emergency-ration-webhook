@@ -308,6 +308,8 @@ existing instance is never overwritten (an operator-set budget is preserved).
 | `enforcementMode` | string enum | `enforce` \| `dry-run` | Enforcement mode (spec-004). `enforce` (default) rejects over-budget pods; `dry-run` admits them with a warning instead. Fail-closed paths reject in both modes. Absent → `enforce`. See [Enforcement Modes](#enforcement-modes-enforce--dry-run). |
 | `excludedNamespaces` | array of strings | optional | List of namespace names whose pods are exempt from capacity admission (spec-008). A pod whose namespace matches ANY entry is admitted without a budget check (OR semantics with `excludedPriorityClasses`). Absent or empty → no namespaces exempted. See [Workload Exclusion](#workload-exclusion). |
 | `excludedPriorityClasses` | array of strings | optional | List of priority class names whose pods are exempt from capacity admission (spec-008). Matched against `pod.spec.priorityClassName` as a **string match** (no PriorityClass resource resolution). A pod matching either list is exempt. Absent or empty → no priority classes exempted. See [Workload Exclusion](#workload-exclusion). |
+| `cpuBudgetPercent` | integer | 0–100, optional | Per-resource CPU budget override (spec-012). When present, the CPU ceiling is derived from this value instead of `budgetPercent`; when absent, CPU falls back to `budgetPercent`. Set both resources independently — see [Per-Resource Budget Overrides](#per-resource-budget-overrides-spec-012). |
+| `memoryBudgetPercent` | integer | 0–100, optional | Per-resource memory budget override (spec-012). Symmetric to `cpuBudgetPercent` for RAM: when present, the memory ceiling uses this value instead of `budgetPercent`. |
 
 **Status** (controller-computed — read-only for operators):
 
@@ -315,11 +317,13 @@ existing instance is never overwritten (an operator-set budget is preserved).
 |-------|------|------|-------------|
 | `allocatedCpuMilli` | integer | milli-CPUs | Sum of pod CPU requests |
 | `allocatedMemoryBytes` | integer | bytes | Sum of pod memory requests |
-| `ceilingCpuMilli` | integer | milli-CPUs | `floor(totalAllocatableCpuMilli × budgetPercent / 100)` |
+| `ceilingCpuMilli` | integer | milli-CPUs | `floor(totalAllocatableCpuMilli × effectiveCpuBudgetPercent / 100)` |
 | `ceilingMemoryBytes` | integer | bytes | Budget ceiling for memory |
 | `utilizationPercentCpu` | number | ratio 0–1+ | `allocated / ceiling` for CPU |
 | `utilizationPercentMemory` | number | ratio 0–1+ | `allocated / ceiling` for memory |
 | `lastUpdated` | string | RFC 3339 | Last recomputation timestamp |
+| `effectiveCpuBudgetPercent` | integer | % | The effective CPU budget the controller used to compute `ceilingCpuMilli` (spec-012): `cpuBudgetPercent` if set, else `budgetPercent`. Exposed for observability — see [Per-Resource Budget Overrides](#per-resource-budget-overrides-spec-012). |
+| `effectiveMemoryBudgetPercent` | integer | % | Effective memory budget (spec-012): `memoryBudgetPercent` if set, else `budgetPercent`. |
 
 ### ClusterCapacity CRD
 
@@ -469,6 +473,54 @@ kubectl patch allocation cluster-allocation --type=merge \
 The Allocation Controller recomputes the per-resource ceilings (`floor(total ×
 budgetPercent / 100)`) within its reconcile window and the webhook picks up the
 new ceilings on the next decision.
+
+> Need to tune CPU and RAM separately? See
+> [Per-Resource Budget Overrides](#per-resource-budget-overrides-spec-012) for
+> `cpuBudgetPercent` / `memoryBudgetPercent`.
+
+### Per-Resource Budget Overrides (spec-012)
+
+`budgetPercent` applies a single budget to both CPU and RAM. Two **optional** spec
+fields — `cpuBudgetPercent` and `memoryBudgetPercent` — override it for their
+respective resource, so you can protect one resource more tightly than the other
+(admit CPU liberally while guarding memory, for example). Each resource resolves
+**independently**: its override if set, else `budgetPercent` as the fallback.
+
+- `cpuBudgetPercent: 95` + `memoryBudgetPercent: 30` → the CPU ceiling is 95% of
+  total allocatable CPU and the memory ceiling is 30% of total allocatable memory.
+- With both absent, behaviour is **byte-identical** to the legacy single-budget
+  controller (backward compatible — a pre-spec-012 singleton is unaffected).
+- `budgetPercent` stays **required**: it is the fallback for any resource without
+  an override, and the only budget when neither override is set.
+
+The Allocation Controller resolves the effective budgets and writes both the
+ceilings and the effective percentages into the status on its next reconcile
+(≤2 s); the webhook reads them from its in-process cache, so a patch takes effect
+**without a restart**.
+
+Set asymmetric overrides with `kubectl patch`:
+
+```sh
+# CPU liberal (95%), memory tight (30%).
+kubectl patch allocation cluster-allocation --type=merge \
+  -p '{"spec":{"cpuBudgetPercent":95,"memoryBudgetPercent":30}}'
+
+# Inspect the resolved ceilings + effective budgets.
+kubectl get allocation cluster-allocation -o jsonpath='{.status}'
+# {"ceilingCpuMilli":...,"ceilingMemoryBytes":...,
+#  "effectiveCpuBudgetPercent":95,"effectiveMemoryBudgetPercent":30,...}
+
+# Remove the overrides (revert to budgetPercent for both resources).
+kubectl patch allocation cluster-allocation --type=json \
+  -p '[{"op":"remove","path":"/spec/cpuBudgetPercent"},{"op":"remove","path":"/spec/memoryBudgetPercent"}]'
+```
+
+The webhook reads the effective budgets from the Allocation **status** (not by
+re-resolving the spec) and emits them as `effective_cpu_budget_percent` /
+`effective_memory_budget_percent` on every budget-resolved decision (see
+[Structured Logging](#structured-logging)). The `erw-verify` S9 scenario validates
+the asymmetric path against a live cluster (see
+[Scenario Inventory](#scenario-inventory)).
 
 ### Enforcement Modes (Enforce / Dry-Run)
 
@@ -657,7 +709,9 @@ identity, the decision, and the capacity figures used. Key fields:
 | `decision` | `allow`, `deny`, `dry_run_deny` (spec-004), `exempt` (spec-008), or `error` |
 | `resource_type` | `cpu` or `memory` (one event per resource on allow/deny) |
 | `allocated` / `requested` / `projected` / `ceiling` | Capacity figures for the resource |
-| `budget_percent` | The active `budgetPercent` used for the decision |
+| `budget_percent` | The `spec.budgetPercent` value — the legacy fallback budget, kept for back-compat in existing log consumers |
+| `effective_cpu_budget_percent` | The effective CPU budget that governed this decision — `cpuBudgetPercent` if set, else `budgetPercent` (spec-012). `-1` on fail-closed / exempt paths. |
+| `effective_memory_budget_percent` | The effective memory budget (spec-012). Symmetric to `effective_cpu_budget_percent`. |
 | `enforcement_mode` | The active `enforcementMode` for the decision — `enforce` or `dry_run` (spec-004; present on every decision) |
 | `exemption_reason` | On `exempt`: the criterion that triggered the bypass — `namespace`, `priority_class`, or `webhook_namespace` (spec-008) |
 | `freshness_seconds` | Age of the cached Allocation status |
@@ -679,7 +733,8 @@ Example (admission allowed, CPU line):
 2026-07-26T14:32:05.123Z  INFO capacity_admission: admission allowed \
   workload=default/api-server operation=CREATE decision=allow resource_type=cpu \
   allocated=70000 requested=5000 projected=75000 ceiling=80000 \
-  budget_percent=80 freshness_seconds=2 latency_ms=3
+  budget_percent=80 effective_cpu_budget_percent=95 effective_memory_budget_percent=30 \
+  freshness_seconds=2 latency_ms=3
 ```
 
 ### Rejection Messages
@@ -944,9 +999,10 @@ timing and a detail line; the report ends with a summary and the exit code.
 | S6 | dry-run mode | an over-budget pod is admitted and the `dry_run_deny` counter increments |
 | S7 | capacity tracking accuracy | ClusterCapacity status matches an independent node sum |
 | S8 | metrics + health endpoints | `/healthz` and `/metrics` respond via the API proxy |
+| S9 | per-resource asymmetric budgets | asymmetric `cpuBudgetPercent`/`memoryBudgetPercent` deny on memory only |
 
-Three degradation scenarios (S9-S11 — kill webhook pods, delete CRD instances,
-induce stale capacity data) are planned for a follow-up phase (US2); see
+Degradation scenarios (kill webhook pods, delete CRD instances, induce stale
+capacity data) are planned for a follow-up phase; see
 [`specs/005-on-demand-verification/`](./specs/005-on-demand-verification/) and the
 [quickstart](./specs/005-on-demand-verification/quickstart.md) for the full design.
 
@@ -1018,7 +1074,7 @@ src/bin/erw-verify/          # on-demand verification tool (spec-005): separate 
 ├── setup.rs                 # apply manifests, self-signed TLS cert (rcgen), caBundle, readiness, pre-flight
 ├── teardown.rs              # reverse-order deletion
 ├── report.rs                # pure human/JSON report rendering
-└── scenarios/               # enforcement scenarios S1-S8 (degradation S9-S11, later)
+└── scenarios/               # enforcement scenarios S1-S9
 deploy/                      # Kubernetes manifests (crds, rbac, deployment, webhook-config, cert-setup)
 tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs) + verify (unit)
 ```

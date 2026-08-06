@@ -162,7 +162,7 @@ src/bin/erw-verify/          # on-demand verification tool (spec-005): separate 
 ├── setup.rs                 # apply manifests, self-signed TLS cert (rcgen), caBundle, readiness, pre-flight
 ├── teardown.rs              # reverse-order deletion
 ├── report.rs                # pure human/JSON report rendering
-└── scenarios/               # enforcement scenarios S1-S8 (degradation S9-S11, later)
+└── scenarios/               # enforcement scenarios S1-S9
 deploy/                      # Kubernetes manifests (crds, rbac, deployment, webhook-config, cert-setup)
 tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs) + verify (unit)
 ```
