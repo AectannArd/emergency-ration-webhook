@@ -448,6 +448,34 @@ mod tests {
         assert_eq!(status.ceiling_memory_bytes, 120 * GIB);
     }
 
+    // ---- spec-012 US2: backward compatibility (FR-005 / FR-008) ----
+
+    #[test]
+    fn no_override_ceilings_byte_identical_to_legacy() {
+        // T019 / FR-005 / research R10: a no-override singleton produces ceilings
+        // byte-identical to the pre-spec-012 controller for every budget_percent.
+        // (budget, None, None) resolves to (budget, budget), so the per-resource
+        // path must equal the legacy single-budget path — the US2 AC1 gate.
+        const GIB: i64 = 1024 * 1024 * 1024;
+        let supply = (100_000, 200 * GIB);
+        for budget in [0, 50, 80, 100] {
+            let status = build_allocation_status((0, 0), supply, (budget, budget));
+            assert_eq!(
+                status.ceiling_cpu_milli,
+                supply.0 * budget as i64 / 100,
+                "CPU ceiling matches legacy floor(supply*{budget}/100)"
+            );
+            assert_eq!(
+                status.ceiling_memory_bytes,
+                supply.1 * budget as i64 / 100,
+                "memory ceiling matches legacy floor(supply*{budget}/100)"
+            );
+            // The effective budgets equal the legacy single budget.
+            assert_eq!(status.effective_cpu_budget_percent, budget);
+            assert_eq!(status.effective_memory_budget_percent, budget);
+        }
+    }
+
     // ---- singleton autocreation (ensure_singleton decision logic) ----
 
     /// Build a `kube::Error::Api` carrying a status with the given HTTP code and
@@ -517,6 +545,21 @@ mod tests {
             alloc.spec.enforcement_mode,
             Some(EnforcementMode::Enforce),
             "auto-created singleton seeds enforce mode (FR-010)"
+        );
+    }
+
+    #[test]
+    fn default_allocation_seeds_no_per_resource_overrides() {
+        // T020 / FR-008: the auto-created singleton has no per-resource overrides,
+        // so a fresh cluster boots in legacy mode (both resources at budget_percent).
+        let alloc = default_allocation_singleton();
+        assert!(
+            alloc.spec.cpu_budget_percent.is_none(),
+            "FR-008: auto-created singleton seeds no CPU override"
+        );
+        assert!(
+            alloc.spec.memory_budget_percent.is_none(),
+            "FR-008: auto-created singleton seeds no memory override"
         );
     }
 
