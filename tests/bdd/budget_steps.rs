@@ -8,7 +8,10 @@
 //!
 //! Run with: `cargo test --test budget_bdd`.
 
-use capacity_admission_webhook::webhook::{AdmissionError, AdmissionVerdict, check_budget};
+use capacity_admission_webhook::crd::{AllocationSpec, resolve_effective_budgets};
+use capacity_admission_webhook::webhook::{
+    AdmissionError, AdmissionVerdict, ceiling_per_resource, check_budget,
+};
 use cucumber::{World as _, given, then, when};
 
 const GIB: i64 = 1024 * 1024 * 1024;
@@ -21,6 +24,10 @@ struct BudgetWorld {
     ceiling_mem: i64,
     existing_cpu: i64,
     response: Option<Result<(), AdmissionError>>,
+    // spec-012: total allocatable supply, used to derive ceilings from per-resource
+    // budgets exactly as the controller does.
+    supply_cpu: i64,
+    supply_mem: i64,
 }
 
 impl BudgetWorld {
@@ -62,6 +69,38 @@ async fn existing_pod(world: &mut BudgetWorld, cpu: i64) {
     world.existing_cpu = cpu;
 }
 
+// ---- spec-012: per-resource budgets derive the ceilings (US1) ----
+
+#[given(expr = "the cluster has {int}m CPU and {int} GiB allocatable")]
+async fn set_supply(world: &mut BudgetWorld, cpu: i64, mem_gib: i64) {
+    world.supply_cpu = cpu;
+    world.supply_mem = mem_gib * GIB;
+}
+
+#[given(expr = "the budget is {int}% with cpuBudgetPercent {int} and memoryBudgetPercent {int}")]
+async fn set_per_resource_budgets(
+    world: &mut BudgetWorld,
+    fallback: i32,
+    cpu_override: i32,
+    mem_override: i32,
+) {
+    // Resolve + compute ceilings exactly as the controller does (FR-002/FR-003),
+    // so this scenario exercises the real per-resource pipeline.
+    let spec = AllocationSpec {
+        budget_percent: fallback,
+        enforcement_mode: None,
+        excluded_namespaces: None,
+        excluded_priority_classes: None,
+        cpu_budget_percent: Some(cpu_override),
+        memory_budget_percent: Some(mem_override),
+    };
+    let budgets = resolve_effective_budgets(&spec);
+    let (ceiling_cpu, ceiling_mem) =
+        ceiling_per_resource((world.supply_cpu, world.supply_mem), budgets);
+    world.ceiling_cpu = ceiling_cpu;
+    world.ceiling_mem = ceiling_mem;
+}
+
 #[when(expr = "a pod requesting {int}m CPU and {int} GiB memory is submitted")]
 async fn submit_pod(world: &mut BudgetWorld, cpu: i64, mem_gib: i64) {
     world.record((cpu, mem_gib * GIB));
@@ -96,6 +135,15 @@ async fn message_contains(world: &mut BudgetWorld, fragment: String) {
     assert!(
         message.contains(&fragment),
         "rejection message {message:?} does not contain {fragment:?}"
+    );
+}
+
+#[then(expr = "the rejection message does not contain {string}")]
+async fn message_does_not_contain(world: &mut BudgetWorld, fragment: String) {
+    let message = world.rejection_message();
+    assert!(
+        !message.contains(&fragment),
+        "rejection message {message:?} unexpectedly contains {fragment:?}"
     );
 }
 

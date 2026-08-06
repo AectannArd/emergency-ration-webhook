@@ -4,7 +4,7 @@ pub mod admission;
 pub mod error;
 pub mod handler;
 
-pub use admission::{AdmissionVerdict, Figures, ceiling, check_budget};
+pub use admission::{AdmissionVerdict, Figures, ceiling, ceiling_per_resource, check_budget};
 pub use error::{AdmissionError, BudgetViolation, MissingCapacityData, ResourceType};
 pub use handler::{
     AppState, Clock, DecisionOutcome, DecisionSummary, DecisionVerdict, Freshness, ResourceFigures,

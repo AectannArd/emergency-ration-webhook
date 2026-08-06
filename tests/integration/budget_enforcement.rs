@@ -13,9 +13,11 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use capacity_admission_webhook::crd::{
     Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, ClusterCapacity,
+    resolve_effective_budgets,
 };
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::parse_rfc3339;
+use capacity_admission_webhook::webhook::admission::ceiling_per_resource;
 use capacity_admission_webhook::webhook::handler::{AppState, handle};
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -274,5 +276,101 @@ async fn both_resources_over_budget_listed_in_message() {
         message.matches('\n').count(),
         1,
         "both resources on separate lines"
+    );
+}
+
+// ---- spec-012 US1 AC1/AC2: per-resource asymmetric budgets ----
+//
+// An operator sets cpuBudgetPercent / memoryBudgetPercent overrides. The
+// controller would resolve them (resolve_effective_budgets) and compute
+// independent ceilings (ceiling_per_resource) into the Allocation status; this
+// test builds that status via the real pipeline, injects it, and confirms the
+// webhook — whose check_budget is unchanged — denies on the single exceeded
+// resource (FR-011).
+
+/// Build the `cluster-allocation` singleton carrying per-resource overrides, with
+/// its status ceilings + effective budgets computed exactly as the controller
+/// would from the 100 CPU / 200 GiB supply (`capacity_store`). `allocated` is the
+/// pre-existing demand.
+fn asymmetric_store(
+    cpu_override: i32,
+    mem_override: i32,
+    allocated: (i64, i64),
+) -> Store<Allocation> {
+    let spec = AllocationSpec {
+        budget_percent: 80,
+        enforcement_mode: None,
+        excluded_namespaces: None,
+        excluded_priority_classes: None,
+        cpu_budget_percent: Some(cpu_override),
+        memory_budget_percent: Some(mem_override),
+    };
+    let budgets = resolve_effective_budgets(&spec);
+    let (ceiling_cpu, ceiling_mem) = ceiling_per_resource((100_000, 200 * GIB), budgets);
+    let mut allocation = Allocation::new(CLUSTER_ALLOCATION_NAME, spec);
+    allocation.status = Some(AllocationStatus {
+        allocated_cpu_milli: allocated.0,
+        allocated_memory_bytes: allocated.1,
+        ceiling_cpu_milli: ceiling_cpu,
+        ceiling_memory_bytes: ceiling_mem,
+        utilization_percent_cpu: 0.0,
+        utilization_percent_memory: 0.0,
+        last_updated: "2026-07-26T14:32:05Z".to_string(),
+        effective_cpu_budget_percent: budgets.0,
+        effective_memory_budget_percent: budgets.1,
+    });
+    let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+    writer.apply_watcher_event(&watcher::Event::Apply(allocation));
+    store
+}
+
+#[tokio::test]
+async fn per_resource_asymmetric_cpu_admits_memory_denies() {
+    // US1 AC1: cpuBudgetPercent 95 (ceiling 95 CPU), memoryBudgetPercent 30
+    // (ceiling 60 GiB). A pod fitting CPU but exceeding memory → denied on memory
+    // ONLY (FR-011).
+    let store = asymmetric_store(95, 30, (0, 0));
+    // Pod: 90 CPU (→ 90_000 ≤ 95_000 ceiling ✓), 150 GiB (→ 150 > 60 GiB ceiling ✗).
+    let resp = handle(
+        review_body("asym1", Operation::Create, &pod("90", "150Gi"), None),
+        &app_state(store),
+    )
+    .await;
+    assert!(!resp.allowed, "memory over its (lower) budget must deny");
+    assert_eq!(resp.result.code, 403);
+    assert!(
+        resp.result.message.contains("memory budget exceeded"),
+        "denial names memory: {}",
+        resp.result.message
+    );
+    assert!(
+        !resp.result.message.contains("CPU budget exceeded"),
+        "CPU is NOT reported as violated (FR-011): {}",
+        resp.result.message
+    );
+}
+
+#[tokio::test]
+async fn per_resource_asymmetric_swap_denies_cpu_only() {
+    // US1 AC2: swap overrides — cpuBudgetPercent 30 (ceiling 30 CPU),
+    // memoryBudgetPercent 95 (ceiling 190 GiB). The same pod now exceeds CPU but
+    // not memory → denied on CPU ONLY.
+    let store = asymmetric_store(30, 95, (0, 0));
+    let resp = handle(
+        review_body("asym2", Operation::Create, &pod("90", "150Gi"), None),
+        &app_state(store),
+    )
+    .await;
+    assert!(!resp.allowed, "CPU over its (lower) budget must deny");
+    assert_eq!(resp.result.code, 403);
+    assert!(
+        resp.result.message.contains("CPU budget exceeded"),
+        "denial names CPU: {}",
+        resp.result.message
+    );
+    assert!(
+        !resp.result.message.contains("memory budget exceeded"),
+        "memory is NOT reported as violated: {}",
+        resp.result.message
     );
 }
