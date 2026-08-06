@@ -19,10 +19,12 @@ use capacity_admission_webhook::crd::{
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::{now_unix, parse_rfc3339, rfc3339_from_unix};
 use capacity_admission_webhook::webhook::error::AdmissionError;
-use capacity_admission_webhook::webhook::handler::{AppState, handle, with_timeout};
+use capacity_admission_webhook::webhook::handler::{
+    AppState, DecisionVerdict, evaluate, handle, with_timeout,
+};
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::core::admission::{AdmissionResponse, Operation};
+use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview, Operation};
 use kube::runtime::reflector::Store;
 use kube::runtime::watcher;
 
@@ -284,4 +286,56 @@ async fn unknown_error_is_rejected() {
     let error = capacity_admission_webhook::webhook::handler::classify_error(foreign);
     let resp = error.into_response("");
     assert_denied(&resp, 500, "internal error");
+}
+
+// ---- spec-012 US3: fail-closed paths set the effective budgets to -1 (FR-010) ----
+//
+// The fail-closed paths return before budget resolution, so the summary carries
+// the "no budget context" sentinel (-1) for both effective fields — matching the
+// existing budget_percent = -1 sentinel. `handle()` only returns the
+// AdmissionResponse, so these call `evaluate()` to observe the summary.
+
+/// Parse the review body produced by [`review_body`] into a typed request.
+fn admission_request(body: Bytes) -> AdmissionRequest<Pod> {
+    let review: AdmissionReview<Pod> = serde_json::from_slice(&body).unwrap();
+    review.try_into().unwrap()
+}
+
+#[tokio::test]
+async fn fail_closed_missing_allocation_sets_effective_budgets_to_minus_one() {
+    let now = parse_rfc3339("2026-07-26T12:00:00Z").unwrap();
+    let empty_allocation = kube::runtime::reflector::store::<Allocation>().0;
+    let capacity = capacity_store(100_000, 200 * GIB, &rfc3339_from_unix(now));
+    let req = admission_request(review_body(
+        "eff-noalloc",
+        Operation::Create,
+        &pod("5", "40Gi"),
+    ));
+    let outcome = evaluate(
+        &req,
+        &empty_allocation,
+        &capacity,
+        now,
+        30,
+        "capacity-admission",
+    );
+    assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+    assert_eq!(outcome.summary.effective_cpu_budget_percent, -1);
+    assert_eq!(outcome.summary.effective_memory_budget_percent, -1);
+}
+
+#[tokio::test]
+async fn fail_closed_stale_data_sets_effective_budgets_to_minus_one() {
+    let now = parse_rfc3339("2026-07-26T12:00:00Z").unwrap();
+    let allocation = allocation_store(status_aged(now, 60)); // 60s > 30s threshold → stale
+    let capacity = capacity_store(100_000, 200 * GIB, &rfc3339_from_unix(now));
+    let req = admission_request(review_body(
+        "eff-stale",
+        Operation::Create,
+        &pod("5", "40Gi"),
+    ));
+    let outcome = evaluate(&req, &allocation, &capacity, now, 30, "capacity-admission");
+    assert_eq!(outcome.summary.verdict, DecisionVerdict::Error);
+    assert_eq!(outcome.summary.effective_cpu_budget_percent, -1);
+    assert_eq!(outcome.summary.effective_memory_budget_percent, -1);
 }

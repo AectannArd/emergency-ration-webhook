@@ -448,6 +448,25 @@ mod tests {
         assert_eq!(status.ceiling_memory_bytes, 120 * GIB);
     }
 
+    // ---- spec-012 US3: effective budgets exposed in status (FR-009) ----
+
+    #[test]
+    fn build_allocation_status_exposes_effective_budgets() {
+        // T022: the status echoes the resolved per-resource budgets that governed
+        // the ceilings, for observability (FR-009). Covers the asymmetric case
+        // (90, 60) -> (90, 60) and the legacy no-override case (80, 80) -> (80, 80).
+        const GIB: i64 = 1024 * 1024 * 1024;
+        let supply = (100_000, 200 * GIB);
+
+        let asymmetric = build_allocation_status((70_000, 110 * GIB), supply, (90, 60));
+        assert_eq!(asymmetric.effective_cpu_budget_percent, 90);
+        assert_eq!(asymmetric.effective_memory_budget_percent, 60);
+
+        let legacy = build_allocation_status((70_000, 110 * GIB), supply, (80, 80));
+        assert_eq!(legacy.effective_cpu_budget_percent, 80);
+        assert_eq!(legacy.effective_memory_budget_percent, 80);
+    }
+
     // ---- spec-012 US2: backward compatibility (FR-005 / FR-008) ----
 
     #[test]
