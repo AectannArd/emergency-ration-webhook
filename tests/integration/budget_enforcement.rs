@@ -36,6 +36,8 @@ fn spec_allocation_status() -> AllocationStatus {
         utilization_percent_cpu: 0.875,
         utilization_percent_memory: 0.6875,
         last_updated: "2026-07-26T14:32:05Z".to_string(),
+        effective_cpu_budget_percent: 80,
+        effective_memory_budget_percent: 80,
     }
 }
 
@@ -49,6 +51,8 @@ fn populated_store() -> Store<Allocation> {
             enforcement_mode: None,
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     allocation.status = Some(spec_allocation_status());
@@ -214,6 +218,8 @@ async fn scenario3_pod_exactly_at_ceiling_is_admitted() {
             enforcement_mode: None,
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     allocation.status = Some(status);

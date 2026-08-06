@@ -39,6 +39,8 @@ fn status_aged(clock_now: i64, age_secs: i64) -> AllocationStatus {
         utilization_percent_cpu: 0.875,
         utilization_percent_memory: 0.6875,
         last_updated: rfc3339_from_unix(clock_now - age_secs),
+        effective_cpu_budget_percent: 80,
+        effective_memory_budget_percent: 80,
     }
 }
 
@@ -50,6 +52,8 @@ fn allocation_with(status: AllocationStatus) -> Allocation {
             enforcement_mode: None,
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     a.status = Some(status);

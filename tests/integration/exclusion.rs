@@ -59,6 +59,8 @@ fn spec_allocation_status() -> AllocationStatus {
         utilization_percent_cpu: 0.875,
         utilization_percent_memory: 0.6875,
         last_updated: FIXTURE_TIME.to_string(),
+        effective_cpu_budget_percent: 80,
+        effective_memory_budget_percent: 80,
     }
 }
 
@@ -99,6 +101,8 @@ fn allocation_excluded(
                 .map(|v| v.into_iter().map(String::from).collect()),
             excluded_priority_classes: excluded_priority_classes
                 .map(|v| v.into_iter().map(String::from).collect()),
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     a.status = Some(spec_allocation_status());

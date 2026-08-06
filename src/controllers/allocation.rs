@@ -77,6 +77,12 @@ pub fn build_allocation_status(
         utilization_percent_cpu: ratio(allocated.0, ceilings.0),
         utilization_percent_memory: ratio(allocated.1, ceilings.1),
         last_updated: now_rfc3339(),
+        // spec-012 provisional: until T016 changes this signature to a resolved
+        // (cpu, memory) tuple, the legacy single budget applies to both resources
+        // (effective == budget_percent), which is exactly correct for a no-override
+        // singleton (FR-005).
+        effective_cpu_budget_percent: budget_percent,
+        effective_memory_budget_percent: budget_percent,
     }
 }
 
@@ -151,6 +157,11 @@ fn default_allocation_singleton() -> Allocation {
             enforcement_mode: Some(EnforcementMode::Enforce),
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            // spec-012 FR-008: a fresh cluster boots in legacy mode — no per-resource
+            // overrides, so both resources fall back to `budget_percent` (byte-identical
+            // to the pre-spec-012 controller).
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     )
 }
@@ -433,6 +444,8 @@ mod tests {
                 enforcement_mode: None,
                 excluded_namespaces: None,
                 excluded_priority_classes: None,
+                cpu_budget_percent: None,
+                memory_budget_percent: None,
             },
         ));
         assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
@@ -534,6 +547,8 @@ mod tests {
                 enforcement_mode: None,
                 excluded_namespaces: None,
                 excluded_priority_classes: None,
+                cpu_budget_percent: None,
+                memory_budget_percent: None,
             },
         );
         let (req, respond) = handle.next_request().await.expect("existence GET");

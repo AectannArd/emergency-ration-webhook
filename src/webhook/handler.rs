@@ -1115,6 +1115,8 @@ mod tests {
             utilization_percent_cpu: 0.0,
             utilization_percent_memory: 0.0,
             last_updated: "2026-07-26T00:00:00Z".to_string(),
+            effective_cpu_budget_percent: 80,
+            effective_memory_budget_percent: 80,
         }
     }
 
@@ -1126,6 +1128,8 @@ mod tests {
                 enforcement_mode: None,
                 excluded_namespaces: None,
                 excluded_priority_classes: None,
+                cpu_budget_percent: None,
+                memory_budget_percent: None,
             },
         );
         a.status = Some(status);

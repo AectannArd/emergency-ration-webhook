@@ -41,6 +41,8 @@ async fn admission_decision_meets_latency_targets() {
             enforcement_mode: None,
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     allocation.status = Some(AllocationStatus {
@@ -51,6 +53,8 @@ async fn admission_decision_meets_latency_targets() {
         utilization_percent_cpu: 0.875,
         utilization_percent_memory: 0.6875,
         last_updated: FIXTURE_TIME.to_string(),
+        effective_cpu_budget_percent: 80,
+        effective_memory_budget_percent: 80,
     });
     alloc_writer.apply_watcher_event(&watcher::Event::Apply(allocation));
 
