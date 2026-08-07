@@ -16,10 +16,11 @@ mod common;
 use std::collections::HashMap;
 
 use capacity_admission_webhook::equalizer::crd::{
-    ClusterState, EqualizerConfig, EqualizerConfigSpec, FLEET_EQUALIZER_NAME, FleetCondition,
-    SecretRef, TargetCluster,
+    ClusterObservation, ClusterState, EqualizerConfig, EqualizerConfigSpec, EqualizerConfigStatus,
+    FLEET_EQUALIZER_NAME, FleetCondition, SecretRef, TargetCluster,
 };
 use capacity_admission_webhook::equalizer::reconcile::reconcile;
+use kube::Client;
 
 const GIB: i64 = 1024 * 1024 * 1024;
 const NS: &str = "fleet-equalizer";
@@ -69,6 +70,52 @@ async fn serve_secret_gets(
             .unwrap_or_else(|| panic!("no fixture Secret for requested name `{name}`"));
         respond.send_response(common::ok_object(secret));
     }
+}
+
+/// Run one reconcile cycle against the home mock, serving the kubeconfig Secret
+/// GETs the loop issues for `target_count` targets, and return the resulting
+/// status. The home client + handle are reused across calls by multi-cycle
+/// scenarios (T029/T035).
+async fn run_reconcile(
+    home_client: &Client,
+    home_handle: &mut common::MockHandle,
+    secrets: &HashMap<String, serde_json::Value>,
+    eq_config: &EqualizerConfig,
+    target_count: usize,
+) -> EqualizerConfigStatus {
+    let home = home_client.clone();
+    let cfg = eq_config.clone();
+    let task = tokio::spawn(async move { reconcile(&home, &cfg).await });
+    serve_secret_gets(home_handle, secrets, target_count).await;
+    task.await.expect("reconcile completed without panicking")
+}
+
+/// Spawn one mock target per `(name, cpu_util, mem_util)` at uniform capacity
+/// (100_000m CPU / 200 GiB RAM), and the matching kubeconfig Secret per target.
+/// Returns the mocks (same order as `targets`) + the Secret fixtures.
+async fn spawn_fleet(
+    targets: &[Target],
+) -> (Vec<common::MockTarget>, HashMap<String, serde_json::Value>) {
+    let mut mocks = Vec::new();
+    let mut secrets = HashMap::new();
+    for (name, cpu_util, mem_util) in targets {
+        let mock = common::spawn_mock_target(*cpu_util, *mem_util, 100_000, 200 * GIB).await;
+        let secret_name = format!("target-{name}");
+        let yaml = common::kubeconfig_yaml(&mock.addr);
+        let secret = common::kubeconfig_secret_value(&secret_name, NS, &yaml);
+        secrets.insert(secret_name, secret);
+        mocks.push(mock);
+    }
+    (mocks, secrets)
+}
+
+/// Look up a cluster's observation in status by name.
+fn obs_for<'a>(status: &'a EqualizerConfigStatus, name: &str) -> &'a ClusterObservation {
+    status
+        .clusters
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("status has an observation for cluster `{name}`"))
 }
 
 #[tokio::test]
@@ -144,4 +191,231 @@ async fn equalize_all_under_target_mocked() {
         assert!(obs.last_error.is_none(), "no error on a reachable cluster");
     }
     assert_eq!(status.condition, FleetCondition::Healthy);
+}
+
+// ===========================================================================
+// Phase 4 / US2 — over-limit compensation (T028–T031). Verification-only: the
+// reconcile loop from T025 is generic (it calls `equalize()` once per resource
+// regardless of over/good partition), so these exercise the same code path as
+// the all-under test — they assert the over-compensation contract holds through
+// the full read → compute → patch cycle.
+// ===========================================================================
+
+#[tokio::test]
+async fn equalize_one_over_compensates_mocked() {
+    // T028 / data-model §2.3 Example 2: 3 mocks, CPU util 65/55/90%, uniform
+    // 100_000m. C is over target (frozen at 90); its overflow (10% × 100_000m =
+    // 10_000m) is split across A and B, dropping each from 80 to 75. Memory is
+    // held under target on every cluster so CPU is the only varying dimension.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 65.0, 50.0), ("b", 55.0, 50.0), ("c", 90.0, 50.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+    let status = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+
+    // Each target received exactly one PATCH; C frozen at 90, A/B compensated to 75.
+    // FR-007: the patch touches only the override keys, never `budgetPercent`.
+    let expected_cpu = [("a", 75), ("b", 75), ("c", 90)];
+    for (i, (name, cpu)) in expected_cpu.iter().enumerate() {
+        let patches = mocks[i].patches();
+        assert_eq!(patches.len(), 1, "one PATCH per target: {patches:?}");
+        let spec = &patches[0]["spec"];
+        assert_eq!(
+            spec["cpuBudgetPercent"].as_i64(),
+            Some(*cpu as i64),
+            "cluster {name} cpuBudgetPercent: {patches:?}"
+        );
+        // Memory all-under → compensated to the 80% target.
+        assert_eq!(
+            spec["memoryBudgetPercent"].as_i64(),
+            Some(80),
+            "cluster {name} memoryBudgetPercent: {patches:?}"
+        );
+        assert!(
+            spec.get("budgetPercent").is_none(),
+            "FR-007: must never patch budgetPercent: {patches:?}"
+        );
+    }
+
+    // C is Over on CPU; A/B Healthy. The fleet is compensating.
+    assert_eq!(obs_for(&status, "a").state, ClusterState::Healthy);
+    assert_eq!(obs_for(&status, "b").state, ClusterState::Healthy);
+    assert_eq!(obs_for(&status, "c").state, ClusterState::Over);
+    assert_eq!(status.condition, FleetCondition::Compensating);
+}
+
+#[tokio::test]
+async fn equalize_two_cycle_utilization_drop_mocked() {
+    // T029: a two-cycle scenario. Cycle 1: CPU 65/55/90 → 75/75/90. Between
+    // cycles C's load drops to 86% (still over). Cycle 2: CPU 65/55/86 → 77/77/86.
+    // C's smaller overflow (6% × 100_000m = 6_000m, /2 = 3_000m → 3pp) drops A/B to
+    // 77. Asserts the per-cluster CPU budget PATCH changes between cycles.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 65.0, 50.0), ("b", 55.0, 50.0), ("c", 90.0, 50.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+
+    // Cycle 1 — C at 90%.
+    let status1 = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+    let cycle1_cpu = [("a", 75), ("b", 75), ("c", 90)];
+    for (i, (name, cpu)) in cycle1_cpu.iter().enumerate() {
+        let patches = mocks[i].patches();
+        assert_eq!(
+            patches.len(),
+            1,
+            "cycle 1: one PATCH per {name}: {patches:?}"
+        );
+        assert_eq!(
+            patches[0]["spec"]["cpuBudgetPercent"].as_i64(),
+            Some(*cpu as i64),
+            "cycle 1 cluster {name}: {patches:?}"
+        );
+    }
+    assert_eq!(status1.condition, FleetCondition::Compensating);
+
+    // C drops to 86% (still over target) — load changed between cycles.
+    mocks[2].set_utilization(86.0, 50.0);
+
+    // Cycle 2 — C at 86%.
+    let status2 = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+    let cycle2_cpu = [("a", 77), ("b", 77), ("c", 86)];
+    for (i, (name, cpu)) in cycle2_cpu.iter().enumerate() {
+        let patches = mocks[i].patches();
+        assert_eq!(
+            patches.len(),
+            2,
+            "cycle 2: a second PATCH per {name}: {patches:?}"
+        );
+        assert_eq!(
+            patches[1]["spec"]["cpuBudgetPercent"].as_i64(),
+            Some(*cpu as i64),
+            "cycle 2 cluster {name}: {patches:?}"
+        );
+        // The budget moved between cycles (75→77 for A/B, 90→86 for C).
+        assert_ne!(
+            patches[0]["spec"]["cpuBudgetPercent"], patches[1]["spec"]["cpuBudgetPercent"],
+            "cluster {name} budget changed across cycles"
+        );
+    }
+    assert_eq!(status2.condition, FleetCondition::Compensating);
+}
+
+#[tokio::test]
+async fn equalize_all_over_freezes_mocked() {
+    // T030 / data-model §2.3 Example 4: every cluster over target (85/85/85%).
+    // No good cluster can absorb overflow, so each is frozen at its current
+    // utilization (85) — there is no compensation. Every cluster still receives a
+    // PATCH setting its (frozen) budget; none is reduced below target.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 85.0, 50.0), ("b", 85.0, 50.0), ("c", 85.0, 50.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+    let status = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+
+    for (i, mock) in mocks.iter().enumerate() {
+        let patches = mock.patches();
+        assert_eq!(patches.len(), 1, "one PATCH per over cluster: {patches:?}");
+        let spec = &patches[0]["spec"];
+        // Frozen at current utilization — NOT reduced.
+        assert_eq!(
+            spec["cpuBudgetPercent"].as_i64(),
+            Some(85),
+            "cluster {} frozen at 85: {patches:?}",
+            targets[i].0
+        );
+        // Memory all-under → target.
+        assert_eq!(spec["memoryBudgetPercent"].as_i64(), Some(80));
+    }
+
+    // Every cluster Over on CPU; the fleet is compensating (no good clusters).
+    for obs in &status.clusters {
+        assert_eq!(obs.state, ClusterState::Over, "cluster {} Over", obs.name);
+    }
+    assert_eq!(status.condition, FleetCondition::Compensating);
+}
+
+#[tokio::test]
+async fn equalize_cpu_ram_independent_mocked() {
+    // T031 / FR-014: CPU and memory are equalized independently. CPU is at target
+    // on every cluster (80/80/80 → 80/80/80, all good); memory has one over-cluster
+    // (75/75/90 → 75/75/90, C frozen, A/B compensated). On the same cluster the two
+    // override fields therefore carry different values, proving the two dimensions
+    // are computed and patched independently.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 80.0, 75.0), ("b", 80.0, 75.0), ("c", 80.0, 90.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+    let status = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+
+    // (cluster, expected CPU budget, expected memory budget).
+    let expected = [("a", 80, 75), ("b", 80, 75), ("c", 80, 90)];
+    for (i, (name, cpu, mem)) in expected.iter().enumerate() {
+        let patches = mocks[i].patches();
+        assert_eq!(patches.len(), 1, "one PATCH per {name}: {patches:?}");
+        let spec = &patches[0]["spec"];
+        assert_eq!(
+            spec["cpuBudgetPercent"].as_i64(),
+            Some(*cpu as i64),
+            "cluster {name} cpuBudgetPercent: {patches:?}"
+        );
+        assert_eq!(
+            spec["memoryBudgetPercent"].as_i64(),
+            Some(*mem as i64),
+            "cluster {name} memoryBudgetPercent: {patches:?}"
+        );
+        // The two resource dimensions differ on the same cluster — independence.
+        assert_ne!(
+            spec["cpuBudgetPercent"], spec["memoryBudgetPercent"],
+            "cluster {name} CPU and memory budgets differ"
+        );
+    }
+
+    // C is Over on memory (CPU good); A/B Healthy on both. Fleet compensating.
+    assert_eq!(obs_for(&status, "a").state, ClusterState::Healthy);
+    assert_eq!(obs_for(&status, "b").state, ClusterState::Healthy);
+    assert_eq!(obs_for(&status, "c").state, ClusterState::Over);
+    assert_eq!(status.condition, FleetCondition::Compensating);
 }

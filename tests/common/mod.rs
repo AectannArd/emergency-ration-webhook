@@ -12,7 +12,10 @@
 //!   at each target's `http://127.0.0.1:<port>` address, so the reconcile loop's
 //!   `build_target_client` → real-HTTP path is exercised faithfully.
 
+#![allow(dead_code)] // shared helper module: each test binary uses a different subset of helpers
+
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
@@ -53,6 +56,25 @@ pub fn ok_object<T: serde::Serialize>(obj: &T) -> Response<Body> {
         .expect("static object response builds")
 }
 
+/// A 404 NotFound response carrying a Kubernetes `Status` body, so kube-rs maps the
+/// home-cluster Secret GET to `kube::Error::Api` (NotFound) — what the reconcile
+/// loop turns into `ConfigError` when a target's kubeconfig Secret is absent.
+pub fn not_found_status(name: &str, namespace: &str) -> Response<Body> {
+    let body = serde_json::json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "message": format!("secrets \"{name}\" not found in namespace \"{namespace}\""),
+        "reason": "NotFound",
+        "code": 404,
+    });
+    let body = serde_json::to_vec(&body).expect("status body serialises");
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from(body))
+        .expect("static 404 response builds")
+}
+
 /// Extract the Secret name from a home-cluster GET path
 /// `/api/v1/namespaces/<ns>/secrets/<name>`.
 pub fn secret_name_from_path(path: &str) -> Option<&str> {
@@ -67,9 +89,16 @@ pub fn secret_name_from_path(path: &str) -> Option<&str> {
 /// and the test driver.
 #[derive(Clone)]
 struct TargetFixture {
-    allocation: serde_json::Value,
+    /// The served `Allocation` body, behind a Mutex so a controllable mock can
+    /// change the utilization it reports between reconcile cycles (two-cycle /
+    /// recovery scenarios).
+    allocation: Arc<Mutex<serde_json::Value>>,
     capacity: serde_json::Value,
     patches: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// When set, Allocation GETs answer 500 — simulating an apiserver that is up
+    /// but erroring, which the reconcile loop classifies as `Unreachable`.
+    /// Flippable between cycles to exercise recovery (FR-012).
+    fail_allocation_get: Arc<AtomicBool>,
 }
 
 /// A running mocked target apiserver. `patches` collects the spec-override PATCH
@@ -77,12 +106,28 @@ struct TargetFixture {
 pub struct MockTarget {
     pub addr: SocketAddr,
     pub patches: Arc<Mutex<Vec<serde_json::Value>>>,
+    allocation: Arc<Mutex<serde_json::Value>>,
+    fail_allocation_get: Arc<AtomicBool>,
 }
 
 impl MockTarget {
     /// The captured PATCH bodies (the `{"spec": {...}}` JSON documents).
     pub fn patches(&self) -> Vec<serde_json::Value> {
         self.patches.lock().expect("patches lock").clone()
+    }
+
+    /// Update the utilization this mock reports on its next Allocation GET. Used by
+    /// two-cycle scenarios where a cluster's load changes between reconcile cycles.
+    pub fn set_utilization(&self, cpu_util: f64, mem_util: f64) {
+        let mut alloc = self.allocation.lock().expect("allocation lock");
+        *alloc = allocation_json(cpu_util, mem_util);
+    }
+
+    /// When `failing`, the mock answers Allocation GETs with HTTP 500 (so the
+    /// reconcile loop classifies the cluster `Unreachable`). Toggle between cycles
+    /// to simulate recovery (FR-012).
+    pub fn set_failing(&self, failing: bool) {
+        self.fail_allocation_get.store(failing, Ordering::SeqCst);
     }
 }
 
@@ -101,12 +146,19 @@ async fn target_route(
     }
     if path.ends_with("/allocations/cluster-allocation") {
         return match method {
-            Method::GET => Json(state.allocation.clone()).into_response(),
+            Method::GET => {
+                if state.fail_allocation_get.load(Ordering::SeqCst) {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+                let alloc = state.allocation.lock().expect("allocation lock").clone();
+                Json(alloc).into_response()
+            }
             Method::PATCH => {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
                     state.patches.lock().expect("patches lock").push(val);
                 }
-                Json(state.allocation.clone()).into_response()
+                let alloc = state.allocation.lock().expect("allocation lock").clone();
+                Json(alloc).into_response()
             }
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         };
@@ -124,12 +176,15 @@ pub async fn spawn_mock_target(
     mem_bytes: i64,
 ) -> MockTarget {
     let patches = Arc::new(Mutex::new(Vec::new()));
+    let allocation = Arc::new(Mutex::new(allocation_json(cpu_util, mem_util)));
+    let fail_allocation_get = Arc::new(AtomicBool::new(false));
     let fixture = TargetFixture {
-        allocation: allocation_json(cpu_util, mem_util),
+        allocation: Arc::clone(&allocation),
         capacity: capacity_json(cpu_milli, mem_bytes),
         // The router captures a clone of this Arc; the shared inner Mutex is how
         // the handler's captured PATCHes reach the returned `MockTarget`.
         patches: Arc::clone(&patches),
+        fail_allocation_get: Arc::clone(&fail_allocation_get),
     };
     let app = Router::new().fallback(target_route).with_state(fixture);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -141,7 +196,12 @@ pub async fn spawn_mock_target(
             eprintln!("mock target server error: {err}");
         }
     });
-    MockTarget { addr, patches }
+    MockTarget {
+        addr,
+        patches,
+        allocation,
+        fail_allocation_get,
+    }
 }
 
 /// A `cluster-allocation` singleton carrying the given utilization in its status.
