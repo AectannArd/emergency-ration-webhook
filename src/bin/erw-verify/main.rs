@@ -210,6 +210,17 @@ async fn run(config: &VerifyConfig, image: Option<&str>) -> Result<ReportData, S
     let mut results = scenarios::enforcement::run(&client).await;
     tracing::info!("enforcement scenarios complete; running degradation scenarios");
     results.extend(scenarios::degradation::run(&client).await);
+    tracing::info!("degradation scenarios complete; running equalizer scenarios");
+    // spec-013 (FR-015): cross-cluster equalizer verification. Opt-in — skipped
+    // (not failed) when no ERW_EQUALIZER_TARGET_KUBECONFIG_* are set, so the
+    // standard single-cluster run is unaffected.
+    let eq_config = scenarios::equalizer::EqualizerRunConfig {
+        home_kubeconfig: config.kubeconfig.clone(),
+        registry: config.registry.clone(),
+        image_tag: config.image_tag.clone(),
+        skip_build: config.skip_build,
+    };
+    results.extend(scenarios::equalizer::run(&eq_config, &client).await);
     let any_failed = results.iter().any(|r| r.status == ScenarioStatus::Fail);
 
     // Teardown unless the operator asked to keep the install for debugging AND a

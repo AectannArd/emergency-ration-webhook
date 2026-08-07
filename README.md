@@ -1056,7 +1056,7 @@ src/
 ├── metrics.rs           # the 8 Prometheus metrics on one registry
 ├── time_util.rs         # RFC 3339 parsing / formatting
 ├── crd/
-│   ├── allocation.rs        # Allocation CRD (spec.budgetPercent + status)
+│   ├── allocation.rs        # Allocation CRD (spec.budgetPercent + per-resource overrides + status)
 │   └── cluster_capacity.rs  # ClusterCapacity CRD (status only)
 ├── controllers/
 │   ├── node_capacity.rs     # supply side: nodes → ClusterCapacity status
@@ -1083,7 +1083,7 @@ src/bin/erw-verify/          # on-demand verification tool (spec-005): separate 
 ├── setup.rs                 # apply manifests, self-signed TLS cert (rcgen), caBundle, readiness, pre-flight
 ├── teardown.rs              # reverse-order deletion
 ├── report.rs                # pure human/JSON report rendering
-└── scenarios/               # enforcement scenarios S1-S9
+└── scenarios/               # enforcement S1-S9 + degradation S10-S11 + equalizer E1-E5 (cross-cluster)
 deploy/                      # Kubernetes manifests — webhook (crds, rbac, deployment, webhook-config, cert-setup) + equalizer (crds, rbac, deployment, example)
 tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs) + verify (unit)
 ```

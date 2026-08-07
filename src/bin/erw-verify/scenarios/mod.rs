@@ -9,6 +9,7 @@ use std::time::Duration;
 
 pub mod degradation;
 pub mod enforcement;
+pub mod equalizer;
 
 /// Outcome of a single verification scenario.
 #[derive(Debug, Clone)]
@@ -34,14 +35,19 @@ pub enum ScenarioGroup {
     Enforcement,
     /// User Story 2: active degradation scenarios (S9-S11).
     Degradation,
+    /// spec-013: multi-cluster equalizer scenarios (E1-E5). Opt-in — skipped
+    /// when no target cluster kubeconfigs are supplied.
+    Equalizer,
 }
 
 impl ScenarioGroup {
-    /// Lower-case label for the JSON report (`"enforcement"` / `"degradation"`).
+    /// Lower-case label for the JSON report (`"enforcement"` / `"degradation"`
+    /// / `"equalizer"`).
     pub fn as_str(self) -> &'static str {
         match self {
             ScenarioGroup::Enforcement => "enforcement",
             ScenarioGroup::Degradation => "degradation",
+            ScenarioGroup::Equalizer => "equalizer",
         }
     }
 }
