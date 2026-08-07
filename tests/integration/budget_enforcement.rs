@@ -13,13 +13,15 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use capacity_admission_webhook::crd::{
     Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, ClusterCapacity,
+    EnforcementMode, resolve_effective_budgets,
 };
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::parse_rfc3339;
-use capacity_admission_webhook::webhook::handler::{AppState, handle};
+use capacity_admission_webhook::webhook::admission::ceiling_per_resource;
+use capacity_admission_webhook::webhook::handler::{AppState, DecisionVerdict, evaluate, handle};
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::core::admission::Operation;
+use kube::core::admission::{AdmissionRequest, AdmissionReview, Operation};
 use kube::runtime::reflector::Store;
 use kube::runtime::watcher;
 
@@ -36,6 +38,8 @@ fn spec_allocation_status() -> AllocationStatus {
         utilization_percent_cpu: 0.875,
         utilization_percent_memory: 0.6875,
         last_updated: "2026-07-26T14:32:05Z".to_string(),
+        effective_cpu_budget_percent: 80,
+        effective_memory_budget_percent: 80,
     }
 }
 
@@ -49,6 +53,8 @@ fn populated_store() -> Store<Allocation> {
             enforcement_mode: None,
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     allocation.status = Some(spec_allocation_status());
@@ -214,6 +220,8 @@ async fn scenario3_pod_exactly_at_ceiling_is_admitted() {
             enforcement_mode: None,
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     allocation.status = Some(status);
@@ -269,4 +277,209 @@ async fn both_resources_over_budget_listed_in_message() {
         1,
         "both resources on separate lines"
     );
+}
+
+// ---- spec-012 US1 AC1/AC2: per-resource asymmetric budgets ----
+//
+// An operator sets cpuBudgetPercent / memoryBudgetPercent overrides. The
+// controller would resolve them (resolve_effective_budgets) and compute
+// independent ceilings (ceiling_per_resource) into the Allocation status; this
+// test builds that status via the real pipeline, injects it, and confirms the
+// webhook — whose check_budget is unchanged — denies on the single exceeded
+// resource (FR-011).
+
+/// Build the `cluster-allocation` singleton carrying per-resource overrides, with
+/// its status ceilings + effective budgets computed exactly as the controller
+/// would from the 100 CPU / 200 GiB supply (`capacity_store`). `allocated` is the
+/// pre-existing demand.
+fn asymmetric_store(
+    cpu_override: i32,
+    mem_override: i32,
+    allocated: (i64, i64),
+) -> Store<Allocation> {
+    asymmetric_store_in_mode(
+        cpu_override,
+        mem_override,
+        allocated,
+        EnforcementMode::Enforce,
+    )
+}
+
+/// Like [`asymmetric_store`] but pins the singleton to `mode` (used by the US3
+/// dry-run-deny observability test).
+fn asymmetric_store_in_mode(
+    cpu_override: i32,
+    mem_override: i32,
+    allocated: (i64, i64),
+    mode: EnforcementMode,
+) -> Store<Allocation> {
+    let spec = AllocationSpec {
+        budget_percent: 80,
+        enforcement_mode: Some(mode),
+        excluded_namespaces: None,
+        excluded_priority_classes: None,
+        cpu_budget_percent: Some(cpu_override),
+        memory_budget_percent: Some(mem_override),
+    };
+    let budgets = resolve_effective_budgets(&spec);
+    let (ceiling_cpu, ceiling_mem) = ceiling_per_resource((100_000, 200 * GIB), budgets);
+    let mut allocation = Allocation::new(CLUSTER_ALLOCATION_NAME, spec);
+    allocation.status = Some(AllocationStatus {
+        allocated_cpu_milli: allocated.0,
+        allocated_memory_bytes: allocated.1,
+        ceiling_cpu_milli: ceiling_cpu,
+        ceiling_memory_bytes: ceiling_mem,
+        utilization_percent_cpu: 0.0,
+        utilization_percent_memory: 0.0,
+        last_updated: "2026-07-26T14:32:05Z".to_string(),
+        effective_cpu_budget_percent: budgets.0,
+        effective_memory_budget_percent: budgets.1,
+    });
+    let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+    writer.apply_watcher_event(&watcher::Event::Apply(allocation));
+    store
+}
+
+#[tokio::test]
+async fn per_resource_asymmetric_cpu_admits_memory_denies() {
+    // US1 AC1: cpuBudgetPercent 95 (ceiling 95 CPU), memoryBudgetPercent 30
+    // (ceiling 60 GiB). A pod fitting CPU but exceeding memory → denied on memory
+    // ONLY (FR-011).
+    let store = asymmetric_store(95, 30, (0, 0));
+    // Pod: 90 CPU (→ 90_000 ≤ 95_000 ceiling ✓), 150 GiB (→ 150 > 60 GiB ceiling ✗).
+    let resp = handle(
+        review_body("asym1", Operation::Create, &pod("90", "150Gi"), None),
+        &app_state(store),
+    )
+    .await;
+    assert!(!resp.allowed, "memory over its (lower) budget must deny");
+    assert_eq!(resp.result.code, 403);
+    assert!(
+        resp.result.message.contains("memory budget exceeded"),
+        "denial names memory: {}",
+        resp.result.message
+    );
+    assert!(
+        !resp.result.message.contains("CPU budget exceeded"),
+        "CPU is NOT reported as violated (FR-011): {}",
+        resp.result.message
+    );
+}
+
+#[tokio::test]
+async fn per_resource_asymmetric_swap_denies_cpu_only() {
+    // US1 AC2: swap overrides — cpuBudgetPercent 30 (ceiling 30 CPU),
+    // memoryBudgetPercent 95 (ceiling 190 GiB). The same pod now exceeds CPU but
+    // not memory → denied on CPU ONLY.
+    let store = asymmetric_store(30, 95, (0, 0));
+    let resp = handle(
+        review_body("asym2", Operation::Create, &pod("90", "150Gi"), None),
+        &app_state(store),
+    )
+    .await;
+    assert!(!resp.allowed, "CPU over its (lower) budget must deny");
+    assert_eq!(resp.result.code, 403);
+    assert!(
+        resp.result.message.contains("CPU budget exceeded"),
+        "denial names CPU: {}",
+        resp.result.message
+    );
+    assert!(
+        !resp.result.message.contains("memory budget exceeded"),
+        "memory is NOT reported as violated: {}",
+        resp.result.message
+    );
+}
+
+// ---- spec-012 US3 AC1: DecisionSummary carries the effective per-resource budgets ----
+//
+// The webhook reads the effective budgets from the Allocation STATUS (not by
+// re-resolving spec — research R5) and threads them onto every budget-resolved
+// decision's summary so they reach the structured log (FR-010). `handle()` only
+// returns the AdmissionResponse, so these call `evaluate()` directly to observe
+// the summary on admit / deny / dry-run-deny.
+
+/// Parse the review body produced by [`review_body`] into a typed request — the
+/// same deserialisation path `handle()` takes internally.
+fn admission_request(body: Bytes) -> AdmissionRequest<Pod> {
+    let review: AdmissionReview<Pod> = serde_json::from_slice(&body).unwrap();
+    review.try_into().unwrap()
+}
+
+/// The fixture clock pinned to the asymmetric store's `last_updated` (fresh).
+fn fixture_now() -> i64 {
+    parse_rfc3339("2026-07-26T14:32:05Z").unwrap()
+}
+
+#[tokio::test]
+async fn summary_carries_effective_budgets_on_admit() {
+    // Asymmetric overrides cpu=95 / mem=30. A pod fitting both ceilings is
+    // admitted, and the summary mirrors the status effective budgets (FR-010).
+    let store = asymmetric_store(95, 30, (0, 0));
+    let req = admission_request(review_body(
+        "eff-admit",
+        Operation::Create,
+        &pod("1", "1Gi"),
+        None,
+    ));
+    let outcome = evaluate(
+        &req,
+        &store,
+        &capacity_store(),
+        fixture_now(),
+        30,
+        "capacity-admission",
+    );
+    assert_eq!(outcome.summary.verdict, DecisionVerdict::Allow);
+    assert_eq!(outcome.summary.effective_cpu_budget_percent, 95);
+    assert_eq!(outcome.summary.effective_memory_budget_percent, 30);
+}
+
+#[tokio::test]
+async fn summary_carries_effective_budgets_on_deny() {
+    // 90 CPU fits the 95% ceiling; 150 GiB exceeds the 30% memory ceiling
+    // (60 GiB) → denied on memory. The summary still carries both effective
+    // budgets from the status (FR-010).
+    let store = asymmetric_store(95, 30, (0, 0));
+    let req = admission_request(review_body(
+        "eff-deny",
+        Operation::Create,
+        &pod("90", "150Gi"),
+        None,
+    ));
+    let outcome = evaluate(
+        &req,
+        &store,
+        &capacity_store(),
+        fixture_now(),
+        30,
+        "capacity-admission",
+    );
+    assert_eq!(outcome.summary.verdict, DecisionVerdict::Deny);
+    assert_eq!(outcome.summary.effective_cpu_budget_percent, 95);
+    assert_eq!(outcome.summary.effective_memory_budget_percent, 30);
+}
+
+#[tokio::test]
+async fn summary_carries_effective_budgets_on_dry_run_deny() {
+    // Dry-run mode: the same over-memory pod is admitted with a warning
+    // (DryRunDeny), and the summary carries the effective budgets too (FR-010).
+    let store = asymmetric_store_in_mode(95, 30, (0, 0), EnforcementMode::DryRun);
+    let req = admission_request(review_body(
+        "eff-dryrun",
+        Operation::Create,
+        &pod("90", "150Gi"),
+        None,
+    ));
+    let outcome = evaluate(
+        &req,
+        &store,
+        &capacity_store(),
+        fixture_now(),
+        30,
+        "capacity-admission",
+    );
+    assert_eq!(outcome.summary.verdict, DecisionVerdict::DryRunDeny);
+    assert_eq!(outcome.summary.effective_cpu_budget_percent, 95);
+    assert_eq!(outcome.summary.effective_memory_budget_percent, 30);
 }

@@ -49,3 +49,28 @@ Feature: Budget enforcement
     When the pod is updated to request 30000m CPU
     Then the pod is rejected
     And the rejection message contains "projected 90000m"
+
+  # Spec-012 US1 AC1 — per-resource asymmetric budgets: CPU admits, memory denies.
+  # The ceilings come from the resolved per-resource budgets (95% CPU, 30% memory),
+  # computed exactly as the controller would (resolve_effective_budgets →
+  # ceiling_per_resource). A CPU-heavy pod fits the 95% CPU ceiling but blows the
+  # 30% memory ceiling → rejected on memory ONLY (FR-011).
+  Scenario: Per-resource asymmetric budgets — CPU admits, memory denies
+    Given the cluster has 100000m CPU and 200 GiB allocatable
+    And the budget is 80% with cpuBudgetPercent 95 and memoryBudgetPercent 30
+    And the current allocation is 0m CPU and 0 GiB memory
+    When a pod requesting 90000m CPU and 150 GiB memory is submitted
+    Then the pod is rejected
+    And the rejection message contains "memory budget exceeded"
+    And the rejection message does not contain "CPU budget exceeded"
+
+  # Spec-012 US1 AC2 — swapped overrides: CPU denies, memory admits.
+  # Same pod, but 30% CPU / 95% memory ceilings → rejected on CPU ONLY.
+  Scenario: Per-resource asymmetric budgets swapped — CPU denies, memory admits
+    Given the cluster has 100000m CPU and 200 GiB allocatable
+    And the budget is 80% with cpuBudgetPercent 30 and memoryBudgetPercent 95
+    And the current allocation is 0m CPU and 0 GiB memory
+    When a pod requesting 90000m CPU and 150 GiB memory is submitted
+    Then the pod is rejected
+    And the rejection message contains "CPU budget exceeded"
+    And the rejection message does not contain "memory budget exceeded"

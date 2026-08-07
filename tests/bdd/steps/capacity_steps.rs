@@ -115,6 +115,8 @@ impl CapacityWorld {
                     enforcement_mode: None,
                     excluded_namespaces: None,
                     excluded_priority_classes: None,
+                    cpu_budget_percent: None,
+                    memory_budget_percent: None,
                 },
             );
             a.status = Some(AllocationStatus {
@@ -125,6 +127,8 @@ impl CapacityWorld {
                 utilization_percent_cpu: ratio(self.allocated_cpu_milli, ceiling_cpu),
                 utilization_percent_memory: ratio(self.allocated_mem_bytes, ceiling_mem),
                 last_updated: FIXTURE_TIME.to_string(),
+                effective_cpu_budget_percent: self.budget_percent,
+                effective_memory_budget_percent: self.budget_percent,
             });
             a
         };

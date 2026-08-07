@@ -167,6 +167,26 @@ spec:
                     either is exempt.
                   items:
                     type: string
+                cpuBudgetPercent:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 100
+                  nullable: true
+                  description: >
+                    Optional CPU budget override (0–100) (spec-012). When present,
+                    the CPU ceiling is derived from this value instead of
+                    budgetPercent; when absent, CPU falls back to budgetPercent.
+                memoryBudgetPercent:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 100
+                  nullable: true
+                  description: >
+                    Optional memory budget override (0–100) (spec-012). Symmetric
+                    to cpuBudgetPercent for RAM: when present, the memory ceiling
+                    is derived from this value instead of budgetPercent.
             status:
               type: object
               properties:
@@ -195,3 +215,16 @@ spec:
                 lastUpdated:
                   type: string
                   description: Timestamp of the last allocation recomputation (RFC 3339).
+                effectiveCpuBudgetPercent:
+                  type: integer
+                  format: int32
+                  description: >
+                    Effective CPU budget percent the controller used to compute
+                    ceilingCpuMilli (spec-012): cpuBudgetPercent if set, else
+                    budgetPercent. Exposed for observability.
+                effectiveMemoryBudgetPercent:
+                  type: integer
+                  format: int32
+                  description: >
+                    Effective memory budget percent (spec-012): memoryBudgetPercent
+                    if set, else budgetPercent. Symmetric to effectiveCpuBudgetPercent.

@@ -16,11 +16,11 @@ use tracing::{debug, info, warn};
 
 use crate::crd::{
     Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, CLUSTER_CAPACITY_NAME,
-    ClusterCapacity, EnforcementMode,
+    ClusterCapacity, EnforcementMode, resolve_effective_budgets,
 };
 use crate::resources::quantity::extract_pod_requests;
 use crate::time_util::now_rfc3339;
-use crate::webhook::admission::ceiling;
+use crate::webhook::admission::ceiling_per_resource;
 
 /// A pod counts toward current allocation unless its phase is terminal.
 ///
@@ -60,15 +60,20 @@ where
     (cpu, memory)
 }
 
-/// Build the full `AllocationStatus` from the raw figures. The ceiling is
-/// `floor(supply * budget / 100)` per resource; utilisation is
-/// `allocated / ceiling` (0 when there is no ceiling).
+/// Build the full `AllocationStatus` from the raw figures. Each resource gets its
+/// own ceiling — `floor(supply * budget / 100)` via [`ceiling_per_resource`] — and
+/// the resolved per-resource budgets are echoed into the status (FR-009).
+/// Utilisation is `allocated / ceiling` (0 when there is no ceiling).
+///
+/// spec-012 (research R3, Option B): the caller resolves the per-resource budgets
+/// once via [`resolve_effective_budgets`] and passes the tuple here, so this
+/// function stays pure arithmetic (figures + budgets → status).
 pub fn build_allocation_status(
     allocated: (i64, i64),
     total_supply: (i64, i64),
-    budget_percent: i32,
+    budgets: (i32, i32),
 ) -> AllocationStatus {
-    let ceilings = ceiling(total_supply, budget_percent);
+    let ceilings = ceiling_per_resource(total_supply, budgets);
     AllocationStatus {
         allocated_cpu_milli: allocated.0,
         allocated_memory_bytes: allocated.1,
@@ -76,6 +81,8 @@ pub fn build_allocation_status(
         ceiling_memory_bytes: ceilings.1,
         utilization_percent_cpu: ratio(allocated.0, ceilings.0),
         utilization_percent_memory: ratio(allocated.1, ceilings.1),
+        effective_cpu_budget_percent: budgets.0,
+        effective_memory_budget_percent: budgets.1,
         last_updated: now_rfc3339(),
     }
 }
@@ -151,6 +158,11 @@ fn default_allocation_singleton() -> Allocation {
             enforcement_mode: Some(EnforcementMode::Enforce),
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            // spec-012 FR-008: a fresh cluster boots in legacy mode — no per-resource
+            // overrides, so both resources fall back to `budget_percent` (byte-identical
+            // to the pre-spec-012 controller).
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     )
 }
@@ -207,8 +219,10 @@ async fn recompute(
 ) {
     // The budget lives in the Allocation CRD spec. It changes rarely; a periodic
     // GET is cheap relative to the recompute interval and avoids a third cache.
-    let budget = match allocation_api.get(CLUSTER_ALLOCATION_NAME).await {
-        Ok(allocation) => allocation.spec.budget_percent,
+    // spec-012: resolve per-resource budgets (override-or-fallback) from the spec;
+    // each resource then gets its own ceiling (FR-002).
+    let budgets = match allocation_api.get(CLUSTER_ALLOCATION_NAME).await {
+        Ok(allocation) => resolve_effective_budgets(&allocation.spec),
         Err(err) if is_not_found(&err) => {
             // The singleton vanished since startup (e.g. an operator deleted it):
             // recreate it and let the next tick read the fresh budget rather than
@@ -237,7 +251,7 @@ async fn recompute(
         })
         .unwrap_or((0, 0));
 
-    let status = build_allocation_status(allocated, supply, budget);
+    let status = build_allocation_status(allocated, supply, budgets);
     let params = PatchParams::default();
     if let Err(err) = allocation_api
         .patch_status(
@@ -398,7 +412,7 @@ mod tests {
         let status = build_allocation_status(
             (70_000, 110 * 1024 * 1024 * 1024),
             (100_000, 200 * 1024 * 1024 * 1024),
-            80,
+            (80, 80),
         );
         assert_eq!(status.ceiling_cpu_milli, 80_000);
         assert_eq!(status.ceiling_memory_bytes, 160 * 1024 * 1024 * 1024);
@@ -409,10 +423,76 @@ mod tests {
 
     #[test]
     fn zero_budget_yields_zero_ceiling() {
-        let status = build_allocation_status((10_000, 10_000), (100_000, 100_000), 0);
+        let status = build_allocation_status((10_000, 10_000), (100_000, 100_000), (0, 0));
         assert_eq!(status.ceiling_cpu_milli, 0);
         assert_eq!(status.ceiling_memory_bytes, 0);
         assert_eq!(status.utilization_percent_cpu, 0.0);
+    }
+
+    // ---- spec-012: per-resource budgets (US1 / FR-003 / FR-009) ----
+
+    #[test]
+    fn build_allocation_status_uses_per_resource_budgets() {
+        // T013: per-resource budgets (90, 60) on supply (100_000, 200 GiB) produce
+        // ceiling_cpu_milli = 90_000, ceiling_memory_bytes = floor(200GiB*60/100),
+        // and the effective-budget status fields mirror the budgets (FR-003/FR-009).
+        const GIB: i64 = 1024 * 1024 * 1024;
+        let status = build_allocation_status((70_000, 110 * GIB), (100_000, 200 * GIB), (90, 60));
+        assert_eq!(status.ceiling_cpu_milli, 90_000);
+        assert_eq!(status.ceiling_memory_bytes, (200 * GIB) * 60 / 100);
+        assert_eq!(status.effective_cpu_budget_percent, 90);
+        assert_eq!(status.effective_memory_budget_percent, 60);
+        // Asymmetric budgets → asymmetric ceilings (sanity: neither matches the
+        // symmetric 80% legacy value).
+        assert_eq!(status.ceiling_cpu_milli, 90_000);
+        assert_eq!(status.ceiling_memory_bytes, 120 * GIB);
+    }
+
+    // ---- spec-012 US3: effective budgets exposed in status (FR-009) ----
+
+    #[test]
+    fn build_allocation_status_exposes_effective_budgets() {
+        // T022: the status echoes the resolved per-resource budgets that governed
+        // the ceilings, for observability (FR-009). Covers the asymmetric case
+        // (90, 60) -> (90, 60) and the legacy no-override case (80, 80) -> (80, 80).
+        const GIB: i64 = 1024 * 1024 * 1024;
+        let supply = (100_000, 200 * GIB);
+
+        let asymmetric = build_allocation_status((70_000, 110 * GIB), supply, (90, 60));
+        assert_eq!(asymmetric.effective_cpu_budget_percent, 90);
+        assert_eq!(asymmetric.effective_memory_budget_percent, 60);
+
+        let legacy = build_allocation_status((70_000, 110 * GIB), supply, (80, 80));
+        assert_eq!(legacy.effective_cpu_budget_percent, 80);
+        assert_eq!(legacy.effective_memory_budget_percent, 80);
+    }
+
+    // ---- spec-012 US2: backward compatibility (FR-005 / FR-008) ----
+
+    #[test]
+    fn no_override_ceilings_byte_identical_to_legacy() {
+        // T019 / FR-005 / research R10: a no-override singleton produces ceilings
+        // byte-identical to the pre-spec-012 controller for every budget_percent.
+        // (budget, None, None) resolves to (budget, budget), so the per-resource
+        // path must equal the legacy single-budget path — the US2 AC1 gate.
+        const GIB: i64 = 1024 * 1024 * 1024;
+        let supply = (100_000, 200 * GIB);
+        for budget in [0, 50, 80, 100] {
+            let status = build_allocation_status((0, 0), supply, (budget, budget));
+            assert_eq!(
+                status.ceiling_cpu_milli,
+                supply.0 * budget as i64 / 100,
+                "CPU ceiling matches legacy floor(supply*{budget}/100)"
+            );
+            assert_eq!(
+                status.ceiling_memory_bytes,
+                supply.1 * budget as i64 / 100,
+                "memory ceiling matches legacy floor(supply*{budget}/100)"
+            );
+            // The effective budgets equal the legacy single budget.
+            assert_eq!(status.effective_cpu_budget_percent, budget);
+            assert_eq!(status.effective_memory_budget_percent, budget);
+        }
     }
 
     // ---- singleton autocreation (ensure_singleton decision logic) ----
@@ -433,6 +513,8 @@ mod tests {
                 enforcement_mode: None,
                 excluded_namespaces: None,
                 excluded_priority_classes: None,
+                cpu_budget_percent: None,
+                memory_budget_percent: None,
             },
         ));
         assert_eq!(classify_check(&lookup), SingletonCheck::Exists);
@@ -485,6 +567,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_allocation_seeds_no_per_resource_overrides() {
+        // T020 / FR-008: the auto-created singleton has no per-resource overrides,
+        // so a fresh cluster boots in legacy mode (both resources at budget_percent).
+        let alloc = default_allocation_singleton();
+        assert!(
+            alloc.spec.cpu_budget_percent.is_none(),
+            "FR-008: auto-created singleton seeds no CPU override"
+        );
+        assert!(
+            alloc.spec.memory_budget_percent.is_none(),
+            "FR-008: auto-created singleton seeds no memory override"
+        );
+    }
+
     // ---- ensure_singleton against a mocked apiserver (Principle VI) ----
     //
     // These drive a real `kube::Api` through `mock_api`, scripting the apiserver
@@ -534,6 +631,8 @@ mod tests {
                 enforcement_mode: None,
                 excluded_namespaces: None,
                 excluded_priority_classes: None,
+                cpu_budget_percent: None,
+                memory_budget_percent: None,
             },
         );
         let (req, respond) = handle.next_request().await.expect("existence GET");

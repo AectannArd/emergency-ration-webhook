@@ -1,10 +1,11 @@
-//! US1 enforcement scenarios S1-S8 (spec-005, research R5-R10).
+//! US1 enforcement scenarios S1-S9 (spec-005 research R5-R10; S9 = spec-012).
 //!
 //! Each scenario exercises one aspect of the admission webhook's enforcement
 //! contract against the live cluster and returns a [`ScenarioResult`]. They are
 //! NOT unit-testable — they run against a real cluster (Constitution Principle
-//! VI: the tool IS the integration coverage). Scenarios S3-S6 patch the shared
-//! Allocation singleton and restore it afterwards, so they MUST run sequentially.
+//! VI: the tool IS the integration coverage). Scenarios S3-S6 and S9 patch the
+//! shared Allocation singleton and restore it afterwards, so they MUST run
+//! sequentially.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -30,7 +31,7 @@ const NAMESPACE: &str = "capacity-admission";
 const POD_NAMESPACE: &str = "default";
 const POD_IMAGE: &str = "nginx";
 
-/// Run all eight enforcement scenarios sequentially, returning their results.
+/// Run all nine enforcement scenarios sequentially, returning their results.
 pub async fn run(client: &Client) -> Vec<ScenarioResult> {
     vec![
         timed("S1", "within-budget pod admitted", s1(client)).await,
@@ -51,6 +52,7 @@ pub async fn run(client: &Client) -> Vec<ScenarioResult> {
         )
         .await,
         timed("S8", "metrics + health endpoints respond", s8(client)).await,
+        timed("S9", "per-resource asymmetric budgets", s9(client)).await,
     ]
 }
 
@@ -295,6 +297,40 @@ async fn s8(client: &Client) -> Result<String, String> {
     Ok("/healthz=ok; /metrics exposes capacity_admission_verdicts_total".into())
 }
 
+// ---- S9: per-resource asymmetric budgets (spec-012, contract §6) ----
+//
+// cpuBudgetPercent=95 (generous), memoryBudgetPercent=30 (tight). A pod with a
+// tiny CPU request but a huge memory request fits the CPU ceiling yet exceeds the
+// memory ceiling → denied on memory ONLY (FR-011). The overrides are restored to
+// null afterwards so the singleton returns to legacy single-budget behaviour.
+
+async fn s9(client: &Client) -> Result<String, String> {
+    apply_per_resource_budgets(client, 95, 30).await?;
+    let name = "erw-verify-s9";
+
+    // 10m CPU is far under the 95% CPU ceiling; 999Gi far exceeds the 30% memory
+    // ceiling → the only violation is memory (the resources are evaluated
+    // independently by the unchanged check_budget).
+    let outcome = create_pod(client, name, "10m", "999Gi").await;
+    let _ = delete_pod(client, name).await;
+    restore_per_resource_budgets(client).await;
+
+    match outcome {
+        Err(e) if is_denied_403(&e) => {
+            let msg = denial_message(&e);
+            if msg.contains("memory budget exceeded") && !msg.contains("CPU budget exceeded") {
+                Ok(format!(
+                    "per-resource budgets: denied on memory only: {msg}"
+                ))
+            } else {
+                Err(format!("expected memory-only denial; got: {msg}"))
+            }
+        }
+        Ok(_) => Err("expected memory-only denial but the pod was admitted".into()),
+        Err(e) => Err(format!("expected HTTP 403 denial; got: {e}")),
+    }
+}
+
 // ===================== helpers =====================
 
 /// Whether a kube error is the webhook's HTTP 403 over-budget rejection.
@@ -416,6 +452,107 @@ async fn apply_budget(client: &Client, budget: i32) -> Result<(), String> {
 /// to settle, so the next scenario starts from a known baseline.
 async fn restore_budget(client: &Client) {
     let _ = apply_budget(client, DEFAULT_BUDGET_PERCENT).await;
+}
+
+/// Patch the Allocation `spec.cpuBudgetPercent` + `spec.memoryBudgetPercent`
+/// overrides (spec-012) and wait for the memory ceiling to settle at
+/// `floor(total_memory * mem_override / 100)`. Mirrors [`apply_budget`]: the
+/// webhook reads the ceiling from the Allocation status, so patching the spec and
+/// testing immediately would race the controller's recompute (≤2 s tick). Only the
+/// memory ceiling is awaited — S9's violating pod exceeds memory, so that is the
+/// ceiling under test.
+async fn apply_per_resource_budgets(
+    client: &Client,
+    cpu_override: i32,
+    mem_override: i32,
+) -> Result<(), String> {
+    let alloc_api: Api<Allocation> = Api::all(client.clone());
+    let patch = serde_json::json!({
+        "spec": {
+            "cpuBudgetPercent": cpu_override,
+            "memoryBudgetPercent": mem_override,
+        }
+    });
+    alloc_api
+        .patch(
+            CLUSTER_ALLOCATION_NAME,
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| format!("patching per-resource budgets: {e}"))?;
+
+    let total_mem = total_allocatable_memory(client).await?;
+    let expected = total_mem.saturating_mul(mem_override as i64) / 100;
+    wait_for_memory_ceiling(&alloc_api, expected, "per-resource budgets").await
+}
+
+/// Restore the per-resource overrides to `null` (legacy fallback to
+/// `budgetPercent`) and wait for the memory ceiling to settle back at the default
+/// budget, so the next scenario starts from a known baseline. Best-effort: a failed
+/// restore is non-fatal because the next scenario's `apply_*` re-patches the spec.
+async fn restore_per_resource_budgets(client: &Client) {
+    let alloc_api: Api<Allocation> = Api::all(client.clone());
+    let patch = serde_json::json!({
+        "spec": {
+            "cpuBudgetPercent": null,
+            "memoryBudgetPercent": null,
+        }
+    });
+    if alloc_api
+        .patch(
+            CLUSTER_ALLOCATION_NAME,
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let total_mem = match total_allocatable_memory(client).await {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let expected = total_mem.saturating_mul(DEFAULT_BUDGET_PERCENT as i64) / 100;
+    let _ = wait_for_memory_ceiling(&alloc_api, expected, "restore per-resource budgets").await;
+}
+
+/// Read the ClusterCapacity singleton's `total_allocatable_memory_bytes`.
+async fn total_allocatable_memory(client: &Client) -> Result<i64, String> {
+    Api::<ClusterCapacity>::all(client.clone())
+        .get(CLUSTER_CAPACITY_NAME)
+        .await
+        .map_err(|e| format!("reading ClusterCapacity supply: {e}"))?
+        .status
+        .as_ref()
+        .map(|s| s.total_allocatable_memory_bytes)
+        .ok_or_else(|| "ClusterCapacity has no status yet".to_string())
+}
+
+/// Poll the Allocation status until `ceiling_memory_bytes` reaches `expected`, or
+/// the 30 s deadline lapses. The webhook reads the ceiling from the status, so the
+/// scenario must wait for the controller's recompute to land before proceeding.
+async fn wait_for_memory_ceiling(
+    alloc_api: &Api<Allocation>,
+    expected: i64,
+    label: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{label} did not propagate: memory ceiling never reached {expected} bytes"
+            ));
+        }
+        if let Ok(a) = alloc_api.get(CLUSTER_ALLOCATION_NAME).await
+            && let Some(status) = &a.status
+            && status.ceiling_memory_bytes == expected
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Patch the Allocation `spec.enforcementMode` (R7 merge patch).

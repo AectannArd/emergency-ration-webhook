@@ -28,22 +28,39 @@ impl AdmissionVerdict {
     }
 }
 
-/// Compute the budget ceiling from cluster supply and the budget percentage:
-/// `floor(total_allocatable * budget_percent / 100)` per resource.
+/// Compute the budget ceiling for a single resource (spec-012):
+/// `floor(total * budget_percent / 100)` with 128-bit intermediates, saturating
+/// to i64. Same arithmetic as [`ceiling`], extracted per-resource. Clamp is
+/// defensive — the CRD schema already bounds the budget to 0–100, but this is the
+/// trust boundary for the figure actually used in decisions.
+pub fn ceiling_single(total: i64, budget_percent: i32) -> i64 {
+    let budget = budget_percent.clamp(0, 100) as i128;
+    let product = total as i128 * budget;
+    // floor(total * budget / 100); saturate to i64 defensively so a future caller
+    // can never produce a wrapping ceiling.
+    ((product / 100).min(i64::MAX as i128)) as i64
+}
+
+/// Per-resource ceiling pair (spec-012). Each figure gets its own budget percent,
+/// mirroring the independent CPU/RAM resolution in [`resolve_effective_budgets`].
+pub fn ceiling_per_resource(total: Figures, budgets: (i32, i32)) -> Figures {
+    (
+        ceiling_single(total.0, budgets.0),
+        ceiling_single(total.1, budgets.1),
+    )
+}
+
+/// Compute the budget ceiling from cluster supply and a single budget percentage:
+/// `floor(total_allocatable * budget_percent / 100)` per resource, applying the
+/// SAME budget to both figures.
 ///
 /// Uses 128-bit intermediates so large clusters (memory in the exabyte range)
-/// cannot overflow before the floor division.
+/// cannot overflow before the floor division. Now a thin delegation to
+/// [`ceiling_per_resource`] with the budget repeated for both resources — the
+/// arithmetic is byte-identical to the pre-spec-012 body (proven by the
+/// `ceiling_per_resource_matches_legacy_ceiling_when_budgets_equal` test, FR-005).
 pub fn ceiling(total_allocatable: Figures, budget_percent: i32) -> Figures {
-    // Clamp defensively; the CRD schema already bounds this to 0–100, but this
-    // function is the trust boundary for the figure actually used in decisions.
-    let budget = budget_percent.clamp(0, 100) as i128;
-    let apply = |total: i64| -> i64 {
-        let product = total as i128 * budget;
-        // floor(total * budget / 100); saturate to i64 defensively so a future
-        // caller can never produce a wrapping ceiling.
-        ((product / 100).min(i64::MAX as i128)) as i64
-    };
-    (apply(total_allocatable.0), apply(total_allocatable.1))
+    ceiling_per_resource(total_allocatable, (budget_percent, budget_percent))
 }
 
 /// Pure budget check (data-model.md §4). Returns `Admit` iff
@@ -234,5 +251,45 @@ mod tests {
         let (cpu, mem) = ceiling((big, big), 50);
         assert_eq!(cpu, big / 2);
         assert_eq!(mem, big / 2);
+    }
+
+    // ---- spec-012: per-resource ceiling helper (data-model.md §3.1) ----
+
+    #[test]
+    fn ceiling_per_resource_applies_each_figure_its_own_budget() {
+        // T003: each figure uses its own budget percent (independent resolution).
+        const GIB: i64 = 1024 * 1024 * 1024;
+        let supply = (100_000, 200 * GIB);
+        // CPU 90% of 100_000 = 90_000; memory 60% of 200 GiB = floor(200GIB*60/100).
+        let (cpu, mem) = ceiling_per_resource(supply, (90, 60));
+        assert_eq!(cpu, 90_000, "CPU figure uses the CPU budget");
+        assert_eq!(
+            mem,
+            (200 * GIB) * 60 / 100,
+            "memory figure uses the memory budget"
+        );
+        // Sanity: the two figures now differ (asymmetric budgets).
+        assert_ne!(cpu, mem);
+    }
+
+    #[test]
+    fn ceiling_per_resource_matches_legacy_ceiling_when_budgets_equal() {
+        // T004: backward-compat equivalence — ceiling_per_resource((t,t),(p,p))
+        // == ceiling((t,t),p) for several (t, p). FR-005 / research R3.
+        let cases: &[(i64, i32)] = &[
+            (320_000, 80),
+            (999, 33),
+            (123_456, 100),
+            (0, 50),
+            (1_000_000, 0),
+            (i64::MAX / 2, 50),
+        ];
+        for &(t, p) in cases {
+            assert_eq!(
+                ceiling_per_resource((t, t), (p, p)),
+                ceiling((t, t), p),
+                "ceiling_per_resource(({t},{t}),({p},{p})) == ceiling(({t},{t}),{p})"
+            );
+        }
     }
 }

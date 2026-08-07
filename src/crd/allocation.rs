@@ -45,6 +45,22 @@ pub fn resolve_enforcement_mode(mode: Option<EnforcementMode>) -> EnforcementMod
     mode.unwrap_or(EnforcementMode::Enforce)
 }
 
+/// Effective per-resource budgets after override-or-fallback resolution (spec-012,
+/// FR-002). Each resource resolves **independently**: its override
+/// (`cpu_budget_percent` / `memory_budget_percent`) if `Some`, else
+/// `budget_percent` as the fallback. Returns `(effective_cpu, effective_memory)`,
+/// each in 0–100 (clamped by the CRD schema — this function does not re-clamp).
+///
+/// Resolution is a total function: any spec that passes schema validation yields a
+/// concrete budget for both resources (FR-002). Pure — no I/O, no async — so it is
+/// unit-tested in isolation and reused by the controller (ceiling computation) and,
+/// in future, the equalizer.
+pub fn resolve_effective_budgets(spec: &AllocationSpec) -> (i32, i32) {
+    let cpu = spec.cpu_budget_percent.unwrap_or(spec.budget_percent);
+    let memory = spec.memory_budget_percent.unwrap_or(spec.budget_percent);
+    (cpu, memory)
+}
+
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[kube(
@@ -83,6 +99,21 @@ pub struct AllocationSpec {
     /// Absent/empty → no priority class exclusions (FR-004). JSON field:
     /// `excludedPriorityClasses`.
     pub excluded_priority_classes: Option<Vec<String>>,
+
+    /// spec-012 (FR-001): optional CPU budget override (0–100). When present, the
+    /// CPU ceiling is derived from this value instead of [`budget_percent`]
+    /// (FR-002). When absent, CPU falls back to [`budget_percent`]. JSON field:
+    /// `cpuBudgetPercent`; serialises as JSON `null` when `None` — plain
+    /// `Option<i32>` serde semantics, identical to the existing optional
+    /// `enforcementMode`/`excludedNamespaces` fields (no skip attribute).
+    #[schemars(range(min = 0, max = 100))]
+    pub cpu_budget_percent: Option<i32>,
+
+    /// spec-012 (FR-001): optional memory budget override (0–100). Symmetric to
+    /// [`cpu_budget_percent`] for RAM. JSON field: `memoryBudgetPercent`;
+    /// serialises as `null` when `None` (same rule as `cpu_budget_percent`).
+    #[schemars(range(min = 0, max = 100))]
+    pub memory_budget_percent: Option<i32>,
 }
 
 /// The criterion that triggered an admission exemption, for observability
@@ -173,6 +204,14 @@ pub struct AllocationStatus {
     pub utilization_percent_memory: f64,
     /// Timestamp of the last allocation recomputation (RFC 3339).
     pub last_updated: String,
+    /// spec-012 (FR-009): the effective CPU budget percent the controller used to
+    /// compute `ceiling_cpu_milli`. Equals `spec.cpuBudgetPercent` if set, else
+    /// `spec.budgetPercent`. Exposed for observability (US3 AC2). JSON field:
+    /// `effectiveCpuBudgetPercent`.
+    pub effective_cpu_budget_percent: i32,
+    /// spec-012 (FR-009): the effective memory budget percent. Symmetric to
+    /// [`effective_cpu_budget_percent`]. JSON field: `effectiveMemoryBudgetPercent`.
+    pub effective_memory_budget_percent: i32,
 }
 
 #[cfg(test)]
@@ -229,6 +268,8 @@ mod tests {
             utilization_percent_cpu: 0.9766,
             utilization_percent_memory: 0.9375,
             last_updated: "2026-07-26T14:32:05Z".to_string(),
+            effective_cpu_budget_percent: 80,
+            effective_memory_budget_percent: 80,
         };
         let json = serde_json::to_value(&status).unwrap();
         assert!(json.get("allocatedCpuMilli").is_some());
@@ -321,6 +362,8 @@ mod tests {
             enforcement_mode: None,
             excluded_namespaces: Some(vec!["kube-system".to_string(), "monitoring".to_string()]),
             excluded_priority_classes: Some(vec!["system-node-critical".to_string()]),
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         };
         let json = serde_json::to_value(&spec).unwrap();
         assert_eq!(
@@ -425,6 +468,8 @@ mod tests {
                 .map(|v| v.into_iter().map(String::from).collect()),
             excluded_priority_classes: excluded_priority_classes
                 .map(|v| v.into_iter().map(String::from).collect()),
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         }
     }
 
@@ -571,5 +616,188 @@ mod tests {
             check_exemption(Some("monitoring"), None, &spec, "capacity-admission"),
             Some(ExemptionReason::Namespace),
         );
+    }
+
+    // ---- spec-012: per-resource budget overrides (FR-001/FR-002/FR-006) ----
+
+    #[test]
+    fn override_fields_serialise_camel_case_round_trip_and_absent_when_none() {
+        // T005: cpuBudgetPercent/memoryBudgetPercent serialise camelCase, round-trip,
+        // and are absent from the JSON (not null) when None (US2 AC2).
+        let with_overrides = AllocationSpec {
+            budget_percent: 80,
+            enforcement_mode: None,
+            excluded_namespaces: None,
+            excluded_priority_classes: None,
+            cpu_budget_percent: Some(90),
+            memory_budget_percent: Some(60),
+        };
+        let json = serde_json::to_value(&with_overrides).unwrap();
+        assert_eq!(
+            json.get("cpuBudgetPercent").and_then(|v| v.as_i64()),
+            Some(90),
+            "cpuBudgetPercent serialises camelCase: {json}"
+        );
+        assert_eq!(
+            json.get("memoryBudgetPercent").and_then(|v| v.as_i64()),
+            Some(60),
+            "memoryBudgetPercent serialises camelCase: {json}"
+        );
+        // Round-trip preserves the overrides.
+        let back: AllocationSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.cpu_budget_percent, Some(90));
+        assert_eq!(back.memory_budget_percent, Some(60));
+
+        // Option<i32> serde semantics (spec-012 constraint #3: no serialisation
+        // hacks): `None` serialises as JSON `null`, identical to the existing
+        // optional `enforcementMode`/`excludedNamespaces` fields (the "existing
+        // pattern" the contract §1.2 cites). The contract's "absent (not null)"
+        // wording is inaccurate for plain `Option<i32>` (which yields `null`, not
+        // absence); the override fields deliberately match the existing optional-
+        // field wire format. What US2 AC2 actually requires — that a pre-feature
+        // singleton round-trips safely — holds: `null` deserialises back to `None`.
+        let without_overrides = AllocationSpec {
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
+            ..with_overrides
+        };
+        let json_none = serde_json::to_value(&without_overrides).unwrap();
+        assert_eq!(
+            json_none.get("cpuBudgetPercent"),
+            Some(&serde_json::Value::Null),
+            "cpuBudgetPercent serialises as null when None (matches existing fields): {json_none}"
+        );
+        assert_eq!(
+            json_none.get("memoryBudgetPercent"),
+            Some(&serde_json::Value::Null),
+            "memoryBudgetPercent serialises as null when None: {json_none}"
+        );
+        // Sanity: an existing optional field exhibits the identical null-when-None
+        // behaviour, locking in the "matching pattern" guarantee.
+        assert_eq!(
+            json_none.get("enforcementMode"),
+            Some(&serde_json::Value::Null),
+            "existing optional fields also serialise as null: {json_none}"
+        );
+        // Round-trip safety: `null` deserialises back to `None`.
+        let back_none: AllocationSpec = serde_json::from_value(json_none).unwrap();
+        assert_eq!(back_none.cpu_budget_percent, None);
+        assert_eq!(back_none.memory_budget_percent, None);
+    }
+
+    #[test]
+    fn crd_schema_override_fields_optional_with_range_and_budget_required() {
+        // T006: cpuBudgetPercent/memoryBudgetPercent are optional integer fields
+        // with minimum:0/maximum:100, NOT in spec.required; budgetPercent stays
+        // required (FR-006).
+        let crd = Allocation::crd();
+        let v = serde_json::to_value(&crd).unwrap();
+        let spec_props = v
+            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties")
+            .expect("spec properties present");
+        for field in ["cpuBudgetPercent", "memoryBudgetPercent"] {
+            let schema = spec_props
+                .get(field)
+                .unwrap_or_else(|| panic!("{field} schema present"));
+            assert_eq!(
+                schema.get("type").and_then(|t| t.as_str()),
+                Some("integer"),
+                "{field} is an integer-typed field: {schema}"
+            );
+            assert_eq!(
+                schema.get("minimum").and_then(|m| m.as_f64()),
+                Some(0.0),
+                "{field} has minimum 0: {schema}"
+            );
+            assert_eq!(
+                schema.get("maximum").and_then(|m| m.as_f64()),
+                Some(100.0),
+                "{field} has maximum 100: {schema}"
+            );
+        }
+        // Neither override is required (FR-001); budgetPercent stays required (FR-006).
+        let required = v
+            .pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/required")
+            .and_then(|r| r.as_array())
+            .expect("spec required array present");
+        let lists = |field: &str| required.iter().any(|v| v.as_str() == Some(field));
+        assert!(
+            !lists("cpuBudgetPercent"),
+            "cpuBudgetPercent must be optional (FR-001)"
+        );
+        assert!(
+            !lists("memoryBudgetPercent"),
+            "memoryBudgetPercent must be optional (FR-001)"
+        );
+        assert!(
+            lists("budgetPercent"),
+            "budgetPercent must stay required (FR-006)"
+        );
+    }
+
+    #[test]
+    fn effective_budget_status_fields_serialise_camel_case_and_round_trip() {
+        // T007: effectiveCpuBudgetPercent/effectiveMemoryBudgetPercent serialise
+        // camelCase and round-trip (FR-009).
+        let status = AllocationStatus {
+            allocated_cpu_milli: 70_000,
+            allocated_memory_bytes: 110 * 1024,
+            ceiling_cpu_milli: 90_000,
+            ceiling_memory_bytes: 120 * 1024,
+            utilization_percent_cpu: 0.777,
+            utilization_percent_memory: 0.916,
+            last_updated: "2026-07-26T14:32:05Z".to_string(),
+            effective_cpu_budget_percent: 90,
+            effective_memory_budget_percent: 60,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json.get("effectiveCpuBudgetPercent")
+                .and_then(|v| v.as_i64()),
+            Some(90),
+            "effectiveCpuBudgetPercent serialises camelCase: {json}"
+        );
+        assert_eq!(
+            json.get("effectiveMemoryBudgetPercent")
+                .and_then(|v| v.as_i64()),
+            Some(60),
+            "effectiveMemoryBudgetPercent serialises camelCase: {json}"
+        );
+        let back: AllocationStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(back.effective_cpu_budget_percent, 90);
+        assert_eq!(back.effective_memory_budget_percent, 60);
+    }
+
+    #[test]
+    fn resolve_effective_budgets_truth_table() {
+        // T002: every row of data-model.md §2's resolution truth table. Each
+        // resource resolves independently — its override if Some, else budget_percent
+        // (FR-002). Format: (budget_percent, cpu_override, memory_override) ->
+        // (effective_cpu, effective_memory).
+        let cases = [
+            ((80, None, None), (80, 80)),          // legacy / backward-compat (US2)
+            ((80, Some(90), None), (90, 80)),      // CPU override, memory fallback
+            ((80, None, Some(60)), (80, 60)),      // memory override, CPU fallback
+            ((80, Some(90), Some(60)), (90, 60)),  // both overridden (US1)
+            ((80, Some(80), Some(80)), (80, 80)),  // override equals fallback
+            ((70, Some(90), None), (90, 70)),      // fallback differs from override
+            ((0, None, None), (0, 0)),             // boundary: 0%
+            ((100, Some(0), Some(100)), (0, 100)), // boundary: 0% / 100%
+        ];
+        for ((bp, cpu, mem), expected) in cases {
+            let spec = AllocationSpec {
+                budget_percent: bp,
+                enforcement_mode: None,
+                excluded_namespaces: None,
+                excluded_priority_classes: None,
+                cpu_budget_percent: cpu,
+                memory_budget_percent: mem,
+            };
+            assert_eq!(
+                resolve_effective_budgets(&spec),
+                expected,
+                "({bp}, {cpu:?}, {mem:?}) -> {expected:?}"
+            );
+        }
     }
 }

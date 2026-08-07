@@ -326,6 +326,13 @@ pub fn evaluate(
 
     let allocated: Figures = (status.allocated_cpu_milli, status.allocated_memory_bytes);
     let ceilings: Figures = (status.ceiling_cpu_milli, status.ceiling_memory_bytes);
+    // spec-012 FR-010: the effective per-resource budgets are read from the
+    // Allocation status. The controller already resolved overrides vs fallback
+    // when it wrote them, so the webhook does not re-resolve (research R5).
+    let effective_budgets = (
+        status.effective_cpu_budget_percent,
+        status.effective_memory_budget_percent,
+    );
 
     match check_budget(allocated, effective, ceilings) {
         AdmissionVerdict::Admit => DecisionOutcome {
@@ -333,6 +340,7 @@ pub fn evaluate(
             summary: DecisionSummary::decision(
                 request,
                 budget_percent,
+                effective_budgets,
                 freshness.seconds,
                 enforcement,
                 ResourceFigures::within(
@@ -358,6 +366,7 @@ pub fn evaluate(
             let summary = DecisionSummary::decision(
                 request,
                 budget_percent,
+                effective_budgets,
                 freshness.seconds,
                 enforcement,
                 ResourceFigures::within(
@@ -581,6 +590,15 @@ pub struct DecisionSummary {
     pub verdict: DecisionVerdict,
     pub reason: String,
     pub budget_percent: i64,
+    /// spec-012 (FR-010): the effective CPU budget percent that governed this
+    /// decision, read from the Allocation **status** (not re-resolved in the
+    /// webhook — research R5). `-1` on the fail-closed / exempt paths that return
+    /// before budget resolution (the "no budget context" sentinel, matching
+    /// [`DecisionSummary::budget_percent`]).
+    pub effective_cpu_budget_percent: i64,
+    /// spec-012 (FR-010): the effective memory budget percent. Symmetric to
+    /// [`DecisionSummary::effective_cpu_budget_percent`].
+    pub effective_memory_budget_percent: i64,
     pub freshness_seconds: i64,
     pub latency_ms: i64,
     /// spec-004: the active enforcement mode for this decision
@@ -598,6 +616,7 @@ impl DecisionSummary {
     fn decision(
         request: &AdmissionRequest<Pod>,
         budget_percent: i32,
+        effective_budgets: (i32, i32),
         freshness_seconds: i64,
         enforcement_mode: EnforcementMode,
         cpu: ResourceFigures,
@@ -609,6 +628,10 @@ impl DecisionSummary {
             verdict: DecisionVerdict::Allow,
             reason: String::new(),
             budget_percent: budget_percent as i64,
+            // spec-012 FR-010: the effective per-resource budgets are read from
+            // the Allocation status (research R5 — never re-resolved in the webhook).
+            effective_cpu_budget_percent: effective_budgets.0 as i64,
+            effective_memory_budget_percent: effective_budgets.1 as i64,
             freshness_seconds,
             latency_ms: 0,
             enforcement_mode: enforcement_mode.as_log_str().to_string(),
@@ -633,6 +656,9 @@ impl DecisionSummary {
             verdict: DecisionVerdict::Exempt,
             reason: String::new(),
             budget_percent: -1,
+            // spec-012 FR-010: exempt path runs before budget resolution.
+            effective_cpu_budget_percent: -1,
+            effective_memory_budget_percent: -1,
             freshness_seconds: -1,
             latency_ms: 0,
             enforcement_mode: enforcement_mode.as_log_str().to_string(),
@@ -695,6 +721,10 @@ fn reject_outcome(
             verdict,
             reason,
             budget_percent: -1,
+            // spec-012 FR-010: fail-closed paths return before budget resolution,
+            // so there is no governing per-resource budget to report.
+            effective_cpu_budget_percent: -1,
+            effective_memory_budget_percent: -1,
             freshness_seconds: -1,
             latency_ms: 0,
             enforcement_mode: enforcement_mode.to_string(),
@@ -726,6 +756,8 @@ fn emit_log(summary: &DecisionSummary) {
                 reason = %summary.reason,
                 error = %summary.reason,
                 budget_percent = summary.budget_percent,
+                effective_cpu_budget_percent = summary.effective_cpu_budget_percent,
+                effective_memory_budget_percent = summary.effective_memory_budget_percent,
                 freshness_seconds = summary.freshness_seconds,
                 latency_ms = summary.latency_ms,
                 "admission rejected"
@@ -763,6 +795,8 @@ fn emit_log(summary: &DecisionSummary) {
                     projected = figures.projected,
                     ceiling = figures.ceiling,
                     budget_percent = summary.budget_percent,
+                    effective_cpu_budget_percent = summary.effective_cpu_budget_percent,
+                    effective_memory_budget_percent = summary.effective_memory_budget_percent,
                     freshness_seconds = summary.freshness_seconds,
                     latency_ms = summary.latency_ms,
                     "admission allowed"
@@ -795,6 +829,8 @@ fn emit_log(summary: &DecisionSummary) {
                     projected = figures.projected,
                     ceiling = figures.ceiling,
                     budget_percent = summary.budget_percent,
+                    effective_cpu_budget_percent = summary.effective_cpu_budget_percent,
+                    effective_memory_budget_percent = summary.effective_memory_budget_percent,
                     freshness_seconds = summary.freshness_seconds,
                     latency_ms = summary.latency_ms,
                     "admission denied"
@@ -1115,6 +1151,8 @@ mod tests {
             utilization_percent_cpu: 0.0,
             utilization_percent_memory: 0.0,
             last_updated: "2026-07-26T00:00:00Z".to_string(),
+            effective_cpu_budget_percent: 80,
+            effective_memory_budget_percent: 80,
         }
     }
 
@@ -1126,6 +1164,8 @@ mod tests {
                 enforcement_mode: None,
                 excluded_namespaces: None,
                 excluded_priority_classes: None,
+                cpu_budget_percent: None,
+                memory_budget_percent: None,
             },
         );
         a.status = Some(status);
@@ -1532,6 +1572,8 @@ mod tests {
             verdict: DecisionVerdict::DryRunDeny,
             reason: "cpu_over_budget".to_string(),
             budget_percent: 80,
+            effective_cpu_budget_percent: 80,
+            effective_memory_budget_percent: 80,
             freshness_seconds: 0,
             latency_ms: 1,
             enforcement_mode: "dry_run".to_string(),
@@ -1600,6 +1642,8 @@ mod tests {
             exemption_reason: Some(ExemptionReason::Namespace),
             reason: String::new(),
             budget_percent: -1,
+            effective_cpu_budget_percent: -1,
+            effective_memory_budget_percent: -1,
             freshness_seconds: -1,
             latency_ms: 2,
             enforcement_mode: "enforce".to_string(),

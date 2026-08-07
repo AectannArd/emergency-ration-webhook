@@ -17,10 +17,11 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use capacity_admission_webhook::crd::{
     Allocation, AllocationSpec, AllocationStatus, CLUSTER_ALLOCATION_NAME, ClusterCapacity,
-    ClusterCapacitySpec, ClusterCapacityStatus, EnforcementMode,
+    ClusterCapacitySpec, ClusterCapacityStatus, EnforcementMode, resolve_effective_budgets,
 };
 use capacity_admission_webhook::metrics::Metrics;
 use capacity_admission_webhook::time_util::{parse_rfc3339, rfc3339_from_unix};
+use capacity_admission_webhook::webhook::admission::ceiling_per_resource;
 use capacity_admission_webhook::webhook::handler::{AppState, handle};
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -48,6 +49,8 @@ fn spec_allocation_status() -> AllocationStatus {
         utilization_percent_cpu: 0.875,
         utilization_percent_memory: 0.6875,
         last_updated: FIXTURE_TIME.to_string(),
+        effective_cpu_budget_percent: 80,
+        effective_memory_budget_percent: 80,
     }
 }
 
@@ -83,6 +86,8 @@ fn allocation_in(mode: EnforcementMode) -> Allocation {
             enforcement_mode: Some(mode),
             excluded_namespaces: None,
             excluded_priority_classes: None,
+            cpu_budget_percent: None,
+            memory_budget_percent: None,
         },
     );
     a.status = Some(spec_allocation_status());
@@ -94,6 +99,39 @@ fn allocation_in(mode: EnforcementMode) -> Allocation {
 fn stale_allocation_in(mode: EnforcementMode) -> Allocation {
     let mut a = allocation_in(mode);
     a.status.as_mut().unwrap().last_updated = rfc3339_from_unix(fixture_now() - 60);
+    a
+}
+
+/// The singleton in `mode` carrying asymmetric per-resource overrides (spec-012),
+/// with its ceilings + effective budgets computed exactly as the controller would
+/// from the 100 CPU / 200 GiB supply (`capacity_store`). `allocated` starts at 0.
+fn asymmetric_allocation_in(
+    mode: EnforcementMode,
+    cpu_override: i32,
+    mem_override: i32,
+) -> Allocation {
+    let spec = AllocationSpec {
+        budget_percent: 80,
+        enforcement_mode: Some(mode),
+        excluded_namespaces: None,
+        excluded_priority_classes: None,
+        cpu_budget_percent: Some(cpu_override),
+        memory_budget_percent: Some(mem_override),
+    };
+    let budgets = resolve_effective_budgets(&spec);
+    let (ceiling_cpu, ceiling_mem) = ceiling_per_resource((100_000, 200 * GIB), budgets);
+    let mut a = Allocation::new(CLUSTER_ALLOCATION_NAME, spec);
+    a.status = Some(AllocationStatus {
+        allocated_cpu_milli: 0,
+        allocated_memory_bytes: 0,
+        ceiling_cpu_milli: ceiling_cpu,
+        ceiling_memory_bytes: ceiling_mem,
+        utilization_percent_cpu: 0.0,
+        utilization_percent_memory: 0.0,
+        last_updated: FIXTURE_TIME.to_string(),
+        effective_cpu_budget_percent: budgets.0,
+        effective_memory_budget_percent: budgets.1,
+    });
     a
 }
 
@@ -306,4 +344,41 @@ async fn mode_switch_enforce_to_dry_run_affects_next_decision() {
     let resp = handle(over_budget_body("rev-2"), &state).await;
     assert!(resp.allowed, "dry-run admits after the switch");
     assert!(resp.warnings.is_some(), "dry-run admit carries a warning");
+}
+
+// ---- spec-012: per-resource dry-run warning is resource-specific (edge case) ----
+//
+// With cpuBudgetPercent:95 (generous) / memoryBudgetPercent:30 (tight), a pod that
+// fits CPU but exceeds memory, admitted in dry-run, carries a memory-ONLY warning.
+// The per-resource split is symmetric between enforce and dry-run (contract §4.1:
+// a memory-only violation produces a memory-only warning).
+
+#[tokio::test]
+async fn dry_run_asymmetric_memory_only_violation_warns_memory_only() {
+    let (store, mut writer) = kube::runtime::reflector::store::<Allocation>();
+    writer.apply_watcher_event(&watcher::Event::Apply(asymmetric_allocation_in(
+        EnforcementMode::DryRun,
+        95,
+        30,
+    )));
+    // 1 CPU fits the 95% ceiling (95 CPU); 150 GiB exceeds the 30% ceiling (60 GiB).
+    let resp = handle(
+        review_body("dry-asym", Operation::Create, &pod("1", "150Gi"), None),
+        &state_with(store),
+    )
+    .await;
+    assert!(resp.allowed, "dry-run admits the memory-over pod");
+    let warnings = resp
+        .warnings
+        .as_ref()
+        .expect("dry-run admit carries a warning");
+    assert_eq!(warnings.len(), 1, "one warning string: {warnings:?}");
+    assert!(
+        warnings[0].contains("memory budget exceeded"),
+        "warning names memory only: {warnings:?}"
+    );
+    assert!(
+        !warnings[0].contains("CPU budget exceeded"),
+        "CPU is NOT in the warning (per-resource): {warnings:?}"
+    );
 }

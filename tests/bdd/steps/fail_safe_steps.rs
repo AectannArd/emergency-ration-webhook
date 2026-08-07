@@ -124,6 +124,8 @@ impl FailSafeWorld {
                     enforcement_mode: None,
                     excluded_namespaces: None,
                     excluded_priority_classes: None,
+                    cpu_budget_percent: None,
+                    memory_budget_percent: None,
                 },
             );
             a.status = Some(AllocationStatus {
@@ -134,6 +136,8 @@ impl FailSafeWorld {
                 utilization_percent_cpu: 0.0,
                 utilization_percent_memory: 0.0,
                 last_updated: rfc3339_from_unix(now - self.allocation_age_secs),
+                effective_cpu_budget_percent: self.budget_percent,
+                effective_memory_budget_percent: self.budget_percent,
             });
             self.allocation_writer
                 .apply_watcher_event(&watcher::Event::Apply(a));
