@@ -6,6 +6,7 @@
 pub mod config;
 pub mod controllers;
 pub mod crd;
+pub mod equalizer;
 pub mod metrics;
 pub mod resources;
 pub mod time_util;
