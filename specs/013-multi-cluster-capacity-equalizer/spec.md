@@ -76,9 +76,10 @@ budget is lowered to 86% and the good clusters rise to `80 − 4/2 = 78%`.
    over-cluster's `cpuBudgetPercent` is frozen at 90, and each good cluster
    receives `80 − 10/2 = 75` (overflow 10 CPU / 2 good clusters).
 2. **Given** the same state after reconciliation, **When** the over-cluster's
-   utilization drops from 90% to 86% (overflow reduced to 4 CPU), **Then** the
-   over-cluster's budget is lowered to 86, and the good clusters' budgets rise to
-   `80 − 4/2 = 78`.
+   utilization drops from 90% to 86% (overflow reduced from 10 to 6 CPU), **Then**
+   the over-cluster's budget is lowered to 86, and the good clusters' budgets rise
+   to `80 − 6/2 = 77`. (Overflow 6% × 100 CPU / 100 = 6_000m; per good cluster
+   3_000m; reduction = 3_000m × 100 / 100_000m = 3%; budget = 80 − 3 = 77.)
 3. **Given** `cpuTargetBudgetPercent: 80` and 3 clusters where ALL three are over
    80% (85%, 85%, 85%), **When** the equalizer reconciles, **Then** each cluster
    is frozen at 85 (no good clusters to compensate; the fleet is uniformly over —
