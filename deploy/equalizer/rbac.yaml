@@ -1,0 +1,95 @@
+# Least-privilege RBAC for the multi-cluster capacity equalizer (spec-013, T039).
+#
+# The equalizer runs in the home cluster (namespace capacity-equalizer) and:
+#   - reads the EqualizerConfig singleton (get/list/watch) + writes its .status;
+#   - reads each target cluster's kubeconfig Secret (get) — these may live in any
+#     namespace the operator chooses, so Secret read is granted cluster-wide.
+# It never touches Nodes or Pods. See contracts/equalizer-config-crd.md §RBAC and
+# contracts/target-cluster-api.md §4.
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capacity-equalizer
+  namespace: capacity-equalizer
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capacity-equalizer
+rules:
+  # EqualizerConfig CRD: read the singleton + write its status (reconcile loop).
+  # Full CRUD is granted so operators can manage the singleton through the same
+  # ServiceAccount if desired (the binary itself only reads + patches status).
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["equalizerconfigs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["equalizerconfigs/status"]
+    verbs: ["get", "update", "patch"]
+  # Target kubeconfig Secrets — the EqualizerConfig references one Secret per
+  # target cluster, in whichever namespace the operator stores them.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: capacity-equalizer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: capacity-equalizer
+subjects:
+  - kind: ServiceAccount
+    name: capacity-equalizer
+    namespace: capacity-equalizer
+
+# ---------------------------------------------------------------------------
+# TARGET-CLUSTER RBAC (apply in EACH target cluster, not the home cluster).
+#
+# The equalizer connects to each target cluster using the kubeconfig stored in
+# that target's Secret. That kubeconfig's identity (typically a ServiceAccount
+# in the target cluster) must be able to read the target's Allocation +
+# ClusterCapacity status and PATCH the Allocation spec overrides. Apply the
+# following in every target cluster:
+#
+# ---
+# apiVersion: v1
+# kind: ServiceAccount
+# metadata:
+#   name: capacity-equalizer
+#   namespace: default            # any namespace; reference it in the kubeconfig
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRole
+# metadata:
+#   name: capacity-equalizer-target
+# rules:
+#   - apiGroups: ["emergency-ration.dev"]
+#     resources: ["allocations"]
+#     verbs: ["get", "patch"]     # read utilization status + write spec overrides
+#   - apiGroups: ["emergency-ration.dev"]
+#     resources: ["clustercapacities"]
+#     verbs: ["get"]              # read allocatable capacity status
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: capacity-equalizer-target
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: ClusterRole
+#   name: capacity-equalizer-target
+# subjects:
+#   - kind: ServiceAccount
+#     name: capacity-equalizer
+#     namespace: default
+#
+# Then build the target's kubeconfig from that ServiceAccount's token and store
+# it in the home-cluster Secret referenced by EqualizerConfig.spec.targets[].
+# ---------------------------------------------------------------------------

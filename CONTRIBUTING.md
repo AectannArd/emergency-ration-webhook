@@ -224,3 +224,28 @@ A maintainer can re-publish without creating a git tag via **Actions → "Publis
 to Docker Hub" → Run workflow**, optionally passing an `image_tag` input (e.g.
 `nightly`) to publish under that tag. The full design (triggers, tag derivation,
 caching) is in [`specs/011-docker-hub-publishing/`](./specs/011-docker-hub-publishing/).
+
+## Multi-Cluster Capacity Equalizer (spec-013)
+
+The equalizer is a separate binary (`capacity-equalizer`) that lives in the same
+Cargo workspace. Build and test it with:
+
+```bash
+# Build the equalizer binary.
+cargo build --bin capacity-equalizer
+
+# Run the equalizer algorithm unit tests (pure function truth-table cases).
+cargo test --test algorithm
+
+# Run the equalizer reconcile integration tests (mocked multi-cluster apiserver).
+cargo test --test reconcile
+
+# Run the equalizer BDD scenarios.
+cargo test --test equalizer_bdd
+
+# Build the equalizer Docker image.
+docker build -f Dockerfile.equalizer -t capacity-equalizer .
+```
+
+The full design (CRD schema, algorithm, multi-cluster client construction, RBAC)
+is in [`specs/013-multi-cluster-capacity-equalizer/`](./specs/013-multi-cluster-capacity-equalizer/).

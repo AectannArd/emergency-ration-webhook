@@ -17,6 +17,12 @@ path = "src/main.rs"
 name = "erw-verify"
 path = "src/bin/erw-verify/main.rs"
 
+# spec-013: multi-cluster capacity equalizer binary. A separate image keeps the
+# equalizer's deployment lifecycle independent from the webhook (research R8).
+[[bin]]
+name = "capacity-equalizer"
+path = "src/bin/capacity-equalizer/main.rs"
+
 [lib]
 name = "capacity_admission_webhook"
 path = "src/lib.rs"
@@ -90,6 +96,23 @@ path = "tests/verify/report.rs"
 [[test]]
 name = "verify_args"
 path = "tests/verify/args.rs"
+
+# spec-013: equalizer unit/integration test targets live under tests/equalizer/,
+# so they must be declared explicitly (Cargo only auto-discovers direct children
+# of tests/ — Pitfall #1).
+[[test]]
+name = "algorithm"
+path = "tests/equalizer/algorithm.rs"
+
+[[test]]
+name = "reconcile"
+path = "tests/equalizer/reconcile.rs"
+
+# spec-013: equalizer BDD (cucumber-rs, harness disabled — it has its own main).
+[[test]]
+name = "equalizer_bdd"
+path = "tests/bdd/steps/equalizer_steps.rs"
+harness = false
 
 [dependencies]
 # Kubernetes client, watcher/reflector/Controller runtime, CRD derive macro.

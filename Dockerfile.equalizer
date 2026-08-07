@@ -1,0 +1,35 @@
+# Multi-stage build for the multi-cluster capacity equalizer (referenced by
+# deploy/equalizer/deployment.yaml). Produces a small static image on a
+# distroless base. 4-space indent per .editorconfig.
+
+# ---- Build stage ----
+FROM rust:1.89-bookworm AS builder
+WORKDIR /usr/src/capacity-admission-webhook
+
+# Build dependencies first (cached layer). Stub ALL [[bin]] entry points so the
+# dependency graph compiles without the real sources (CI failure catalog Layer 9):
+# the webhook (src/main.rs), erw-verify (src/bin/erw-verify/main.rs) AND the
+# equalizer itself (src/bin/capacity-equalizer/main.rs) — every [[bin]] in
+# Cargo.toml must exist for `cargo build --release` to succeed.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src/bin/erw-verify src/bin/capacity-equalizer && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "" > src/lib.rs && \
+    echo "fn main() {}" > src/bin/erw-verify/main.rs && \
+    echo "fn main() {}" > src/bin/capacity-equalizer/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# Build the actual binary.
+COPY . .
+RUN touch src/main.rs src/lib.rs src/bin/capacity-equalizer/main.rs && \
+    cargo build --release --bin capacity-equalizer
+
+# ---- Runtime stage ----
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder \
+    /usr/src/capacity-admission-webhook/target/release/capacity-equalizer \
+    /usr/local/bin/capacity-equalizer
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/capacity-equalizer"]
