@@ -16,6 +16,7 @@
 pub mod algorithm;
 pub mod cluster_client;
 pub mod crd;
+pub mod reconcile;
 
 /// Boxed error alias for equalizer operations that can fail heterogeneously
 /// (UTF-8 parse, kubeconfig parse, kube client/config errors). The reconcile loop

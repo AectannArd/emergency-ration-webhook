@@ -104,6 +104,16 @@ path = "tests/verify/args.rs"
 name = "algorithm"
 path = "tests/equalizer/algorithm.rs"
 
+[[test]]
+name = "reconcile"
+path = "tests/equalizer/reconcile.rs"
+
+# spec-013: equalizer BDD (cucumber-rs, harness disabled — it has its own main).
+[[test]]
+name = "equalizer_bdd"
+path = "tests/bdd/steps/equalizer_steps.rs"
+harness = false
+
 [dependencies]
 # Kubernetes client, watcher/reflector/Controller runtime, CRD derive macro.
 # `admission` brings in the AdmissionReview/AdmissionResponse types
