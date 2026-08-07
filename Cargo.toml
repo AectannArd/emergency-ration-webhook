@@ -3,7 +3,7 @@ name = "capacity-admission-webhook"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Kubernetes validating admission webhook that enforces a cluster capacity budget."
+description = "Kubernetes capacity management: validating admission webhook (per-cluster CPU/RAM budget) + multi-cluster capacity equalizer."
 license = "Apache-2.0"
 
 [[bin]]
