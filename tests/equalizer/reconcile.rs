@@ -72,6 +72,32 @@ async fn serve_secret_gets(
     }
 }
 
+/// Like [`serve_secret_gets`], but the Secret named `missing` gets a 404 NotFound
+/// (so the reconcile loop classifies that target's kubeconfig Secret as absent →
+/// `ConfigError`). Used by the missing-Secret reachability test (T034).
+async fn serve_secret_gets_with_missing(
+    handle: &mut common::MockHandle,
+    secrets: &HashMap<String, serde_json::Value>,
+    missing: &str,
+    namespace: &str,
+    count: usize,
+) {
+    for _ in 0..count {
+        let (req, respond) = handle.next_request().await.expect("a Secret GET");
+        assert_eq!(req.method().as_str(), "GET", "home reads Secrets via GET");
+        let name =
+            common::secret_name_from_path(req.uri().path()).expect("Secret name in GET path");
+        if name == missing {
+            respond.send_response(common::not_found_status(name, namespace));
+        } else {
+            let secret = secrets
+                .get(name)
+                .unwrap_or_else(|| panic!("no fixture Secret for requested name `{name}`"));
+            respond.send_response(common::ok_object(secret));
+        }
+    }
+}
+
 /// Run one reconcile cycle against the home mock, serving the kubeconfig Secret
 /// GETs the loop issues for `target_count` targets, and return the resulting
 /// status. The home client + handle are reused across calls by multi-cycle
@@ -418,4 +444,198 @@ async fn equalize_cpu_ram_independent_mocked() {
     assert_eq!(obs_for(&status, "b").state, ClusterState::Healthy);
     assert_eq!(obs_for(&status, "c").state, ClusterState::Over);
     assert_eq!(status.condition, FleetCondition::Compensating);
+}
+
+// ===========================================================================
+// Phase 5 / US3 — target reachability & status reporting (T033–T036).
+// Verification-only: the reconcile loop from T025 already resolves each target
+// independently and records per-cluster failures (Unreachable / ConfigError) in
+// status, continuing with the remaining clusters (FR-009, FR-012).
+// ===========================================================================
+
+#[tokio::test]
+async fn unreachable_cluster_skipped_mocked() {
+    // T033: cluster C's apiserver errors on Allocation reads (HTTP 500). C is
+    // classified Unreachable and skipped (no PATCH); A/B are patched with their
+    // computed budgets. The fleet is Degraded.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 65.0, 60.0), ("b", 55.0, 50.0), ("c", 45.0, 40.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    // C's apiserver is up but erroring on Allocation reads.
+    mocks[2].set_failing(true);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+    let status = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+
+    // A/B patched (all-under → 80); C NOT patched (Unreachable, never reached the
+    // PATCH phase — it failed at the Allocation read).
+    let a = mocks[0].patches();
+    let b = mocks[1].patches();
+    let c = mocks[2].patches();
+    assert_eq!(a.len(), 1, "reachable A patched: {a:?}");
+    assert_eq!(b.len(), 1, "reachable B patched: {b:?}");
+    assert_eq!(c.len(), 0, "unreachable C is not patched: {c:?}");
+    assert_eq!(a[0]["spec"]["cpuBudgetPercent"].as_i64(), Some(80));
+    assert_eq!(b[0]["spec"]["cpuBudgetPercent"].as_i64(), Some(80));
+
+    // C Unreachable with an error message; A/B Healthy. Fleet Degraded.
+    assert_eq!(obs_for(&status, "a").state, ClusterState::Healthy);
+    assert_eq!(obs_for(&status, "b").state, ClusterState::Healthy);
+    let c_obs = obs_for(&status, "c");
+    assert_eq!(c_obs.state, ClusterState::Unreachable);
+    let err = c_obs
+        .last_error
+        .as_ref()
+        .expect("C carries an error message");
+    assert!(!err.is_empty(), "error message is non-empty: {err}");
+    assert_eq!(status.condition, FleetCondition::Degraded);
+}
+
+#[tokio::test]
+async fn config_error_missing_secret_mocked() {
+    // T034: cluster C's kubeconfig Secret is absent from the home cluster (the
+    // home mock answers C's Secret GET with 404). C is classified ConfigError and
+    // skipped before any target call; A/B resolve + patch normally.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 65.0, 60.0), ("b", 55.0, 50.0), ("c", 45.0, 40.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+    let home = home_client.clone();
+    let cfg = eq_config.clone();
+    let task = tokio::spawn(async move { reconcile(&home, &cfg).await });
+
+    // C's Secret ("target-c") is absent → home mock answers 404 for it.
+    serve_secret_gets_with_missing(&mut home_handle, &secrets, "target-c", NS, targets.len()).await;
+    let status = task.await.expect("reconcile completed without panicking");
+
+    // A/B patched; C never reached (the Secret read failed first).
+    assert_eq!(mocks[0].patches().len(), 1, "A patched");
+    assert_eq!(mocks[1].patches().len(), 1, "B patched");
+    assert_eq!(mocks[2].patches().len(), 0, "C (ConfigError) not patched");
+
+    // C ConfigError naming the missing Secret; A/B Healthy. Fleet Degraded.
+    assert_eq!(obs_for(&status, "a").state, ClusterState::Healthy);
+    assert_eq!(obs_for(&status, "b").state, ClusterState::Healthy);
+    let c_obs = obs_for(&status, "c");
+    assert_eq!(c_obs.state, ClusterState::ConfigError);
+    let err = c_obs
+        .last_error
+        .as_ref()
+        .expect("C carries an error message");
+    assert!(
+        err.contains("target-c"),
+        "error names the missing Secret: {err}"
+    );
+    assert_eq!(status.condition, FleetCondition::Degraded);
+}
+
+#[tokio::test]
+async fn recovery_unreachable_to_healthy_mocked() {
+    // T035 / FR-012: cluster C is unreachable on cycle 1 (Unreachable, skipped),
+    // then recovers on cycle 2 (reachable → Healthy, budget applied). The cycle
+    // is stateless per tick, so recovery is just the next reconcile succeeding.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 65.0, 60.0), ("b", 55.0, 50.0), ("c", 45.0, 40.0)];
+    let (mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+
+    // Cycle 1 — C failing.
+    mocks[2].set_failing(true);
+    let status1 = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+    assert_eq!(obs_for(&status1, "c").state, ClusterState::Unreachable);
+    assert_eq!(obs_for(&status1, "a").state, ClusterState::Healthy);
+    assert_eq!(status1.condition, FleetCondition::Degraded);
+    assert_eq!(
+        mocks[2].patches().len(),
+        0,
+        "C not patched while unreachable"
+    );
+
+    // Cycle 2 — C recovers.
+    mocks[2].set_failing(false);
+    let status2 = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+    let c_obs = obs_for(&status2, "c");
+    assert_eq!(c_obs.state, ClusterState::Healthy, "C recovered to Healthy");
+    assert!(c_obs.last_error.is_none(), "no error after recovery");
+    // C patched exactly once (on cycle 2 — it was skipped on cycle 1).
+    let c_patches = mocks[2].patches();
+    assert_eq!(
+        c_patches.len(),
+        1,
+        "C patched once recovered: {c_patches:?}"
+    );
+    assert_eq!(c_patches[0]["spec"]["cpuBudgetPercent"].as_i64(), Some(80));
+    assert_eq!(
+        status2.condition,
+        FleetCondition::Healthy,
+        "fleet Healthy once C recovered"
+    );
+}
+
+#[tokio::test]
+async fn full_status_shape_mocked() {
+    // T036: every ClusterObservation field (the 10 per the CRD contract §3) is
+    // populated for a reachable cluster, plus the top-level condition +
+    // lastReconciled. Asserted on the returned EqualizerConfigStatus struct.
+    common::ensure_crypto_provider();
+    let targets: Vec<Target> = vec![("a", 65.0, 60.0), ("b", 55.0, 50.0), ("c", 45.0, 40.0)];
+    let (_mocks, secrets) = spawn_fleet(&targets).await;
+    let eq_config = equalizer_config(&targets, 80, 80);
+
+    let (home_client, mut home_handle) = common::mock_home_client();
+    let status = run_reconcile(
+        &home_client,
+        &mut home_handle,
+        &secrets,
+        &eq_config,
+        targets.len(),
+    )
+    .await;
+
+    assert_eq!(status.clusters.len(), targets.len());
+    assert_eq!(status.condition, FleetCondition::Healthy);
+    assert!(
+        !status.last_reconciled.is_empty(),
+        "lastReconciled populated"
+    );
+
+    // Inspect cluster A — all 10 ClusterObservation fields populated.
+    let a = obs_for(&status, "a");
+    assert_eq!(a.name, "a"); // 1. name
+    assert_eq!(a.cpu_utilization_percent, 65.0); // 2. observed CPU util
+    assert_eq!(a.memory_utilization_percent, 60.0); // 3. observed memory util
+    assert_eq!(a.total_allocatable_cpu_milli, 100_000); // 4. allocatable CPU (milli)
+    assert_eq!(a.total_allocatable_memory_bytes, 200 * GIB); // 5. allocatable memory (bytes)
+    assert_eq!(a.computed_cpu_budget_percent, 80); // 6. computed CPU budget
+    assert_eq!(a.computed_memory_budget_percent, 80); // 7. computed memory budget
+    assert_eq!(a.state, ClusterState::Healthy); // 8. state
+    assert!(a.last_error.is_none()); // 9. last_error (None when healthy)
+    assert!(!a.last_observed.is_empty(), "lastObserved populated"); // 10. last_observed
 }
