@@ -7,7 +7,7 @@
 #
 # Generated from `EqualizerConfig::crd()` (kube derive). Regenerate, if the spec
 # structs in src/equalizer/crd.rs change, with:
-#   cargo run --example gen-equalizer-crd > deploy/equalizer/crds.yaml
+#   cargo run --example gen-equalizer-crd > deploy/kustomize/equalizer/crds.yaml
 # (then re-add this header). Schema matches contracts/equalizer-config-crd.md §2-3.
 
 ---

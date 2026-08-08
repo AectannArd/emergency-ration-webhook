@@ -11,7 +11,7 @@ namespace: capacity-equalizer
 reconcile:
   intervalSeconds: 10
 
-# Container resources (matches deploy/equalizer/deployment.yaml defaults).
+# Container resources (matches deploy/kustomize/equalizer/deployment.yaml defaults).
 resources:
   requests:
     cpu: 50m

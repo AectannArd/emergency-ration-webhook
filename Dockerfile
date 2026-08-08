@@ -1,5 +1,5 @@
 # Multi-stage build for the capacity admission webhook (referenced by
-# deploy/deployment.yaml). Produces a small static image on a distroless base.
+# deploy/kustomize/webhook/deployment.yaml). Produces a small static image on a distroless base.
 # 4-space indent per .editorconfig.
 
 # ---- Build stage ----

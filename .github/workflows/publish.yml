@@ -7,7 +7,7 @@
 #   workflow_dispatch          → manual ad-hoc publish (optional image_tag input,
 #     defaults to the commit short SHA).
 #
-# Two jobs:
+# Three jobs:
 #   quality — re-runs the Rust gate (fmt + clippy + test), mirroring ci.yml's
 #     quality job so a red gate blocks publishing (FR-013).
 #   publish — gated on the canonical repo (FR-009); a matrix builds each
@@ -15,6 +15,10 @@
 #     linux/amd64 + linux/arm64 (FR-003) and pushes a multi-arch manifest per
 #     image. Depends on `quality`. Adding a new Docker artifact (Principle XV)
 #     means adding an entry to the publish matrix below.
+#   charts  — gated on `quality` (like publish); stamps the chart version from
+#     the git tag, lints + packages both Helm charts, and attaches the `.tgz`
+#     files to the GitHub Release. Runs parallel to `publish`; neither depends
+#     on the other (Principle XV — every containerised artifact ships its charts).
 
 name: Publish to Docker Hub
 
@@ -106,3 +110,49 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  charts:
+    name: Package + attach Helm charts
+    needs: quality
+    if: github.repository == 'AectannArd/emergency-ration-webhook'
+    runs-on: ubuntu-latest
+    permissions:
+      # softprops/action-gh-release attaches the .tgz files to the Release.
+      contents: write
+    steps:
+      - name: Checkout (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+      - name: Stamp chart versions from the git tag
+        run: |
+          # vX.Y.Z → X.Y.Z on tag push; workflow_dispatch has no tag
+          # (GITHUB_REF_NAME is the branch), so fall back to a dev build
+          # stamped with the short SHA.
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9] ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "VERSION=${VERSION}"
+          for chart in deploy/charts/webhook deploy/charts/equalizer; do
+            sed -i "s|^version:.*|version: \"${VERSION}\"|" "$chart/Chart.yaml"
+            sed -i "s|^appVersion:.*|appVersion: \"${VERSION}\"|" "$chart/Chart.yaml"
+          done
+      - name: Lint charts (gate)
+        run: |
+          helm lint deploy/charts/webhook
+          helm lint deploy/charts/equalizer
+      - name: Package charts
+        run: |
+          mkdir -p .temp/charts
+          helm package deploy/charts/webhook --destination .temp/charts/
+          helm package deploy/charts/equalizer --destination .temp/charts/
+      - name: Attach charts to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            .temp/charts/emergency-ration-webhook-*.tgz
+            .temp/charts/emergency-ration-equalizer-*.tgz

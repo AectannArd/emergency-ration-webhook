@@ -1,7 +1,8 @@
-//! Webhook stack setup (spec-005, research R2-R5, R16): apply the embedded
-//! `deploy/*.yaml` manifests, generate a self-signed TLS certificate in-process,
-//! inject it into the webhook-config `caBundle`, wait for readiness, and run the
-//! cluster-cleanness pre-flight check.
+//! Webhook stack setup (spec-005, research R2-R5, R16): apply the
+//! Kustomize-rendered webhook manifests (built at compile time by the root
+//! `build.rs` from `deploy/kustomize/webhook`), generate a self-signed TLS
+//! certificate in-process, inject it into the webhook-config `caBundle`, wait
+//! for readiness, and run the cluster-cleanness pre-flight check.
 //!
 //! Manifests are applied with **server-side apply** (`Patch::Apply`), not
 //! strategic merge patch. Research R2 preferred `Patch::Merge`, but JSON merge
@@ -33,7 +34,7 @@ use crate::error::{Result, err};
 const NAMESPACE: &str = "capacity-admission";
 /// TLS Secret the Deployment mounts at `/tls`.
 const TLS_SECRET_NAME: &str = "capacity-admission-webhook-tls";
-/// ValidatingWebhookConfiguration name (deploy/webhook-config.yaml).
+/// ValidatingWebhookConfiguration name (in the webhook Kustomize bundle).
 const WEBHOOK_CONFIG_NAME: &str = "capacity-admission.emergency-ration.dev";
 /// The single webhook's name (== the configuration name).
 const WEBHOOK_NAME: &str = "capacity-admission.emergency-ration.dev";
@@ -50,11 +51,12 @@ const SERVICE_DNS_NAMES: [&str; 3] = [
     "capacity-admission-webhook.capacity-admission.svc",
 ];
 
-// Embedded manifests (compiled in — single-binary property, no runtime file reads).
-const CRDS: &str = include_str!("../../../deploy/crds.yaml");
-const RBAC: &str = include_str!("../../../deploy/rbac.yaml");
-const DEPLOYMENT: &str = include_str!("../../../deploy/deployment.yaml");
-const WEBHOOK_CONFIG: &str = include_str!("../../../deploy/webhook-config.yaml");
+// Embedded manifests (compiled in — single-binary property, no runtime file
+// reads). `build.rs` renders `deploy/kustomize/webhook` to this file at compile
+// time (spec-015); the stream bundles the Namespace, CRDs, RBAC, Deployment,
+// Service, cert-manager Issuer/Certificate, and ValidatingWebhookConfiguration
+// as one multi-document YAML.
+const WEBHOOK_MANIFESTS: &str = include_str!(concat!(env!("OUT_DIR"), "/webhook-manifests.yaml"));
 
 // ---------------------------------------------------------------------------
 // T014 — pre-flight: refuse to run against a non-empty cluster (research R16).
@@ -92,48 +94,50 @@ pub async fn check_cluster_clean(client: &Client) -> Result<()> {
 // T010 — apply the embedded manifests (research R2).
 // ---------------------------------------------------------------------------
 
-/// Apply all embedded `deploy/*.yaml` manifests in CI dependency order:
-/// namespace → RBAC → CRDs → Deployment/Service → webhook-config.
+/// Apply the Kustomize-rendered webhook manifests via server-side apply. The
+/// Namespace is applied first (the ServiceAccount and webhook pods reference
+/// it); the remaining documents follow in render order (CRDs → RBAC → Service →
+/// Deployment → ValidatingWebhookConfiguration). SSA is create-or-update, so the
+/// order between the post-Namespace documents is not significant for
+/// correctness.
+///
+/// The render includes cert-manager's Issuer + Certificate (cert-setup.yaml).
+/// This tool provisions TLS itself (rcgen + a manual Secret + caBundle
+/// injection) and the S1–S11 clusters ship no cert-manager, so those documents
+/// are skipped — applying them against a missing cert-manager CRD would fail
+/// setup.
 ///
 /// When `image` is `Some`, the resolved fully-qualified image reference is
 /// substituted into every Deployment's first container before it is applied
-/// (spec-009, FR-007) — overriding the `ERW_IMAGE_PLACEHOLDER` in
-/// `deploy/deployment.yaml`. `None` (`--skip-build` with no registry) leaves the
-/// placeholder as-is (research R3).
+/// (spec-009, FR-007) — overriding the Kustomize default image
+/// (`aectann/emergency-ration-webhook:latest`, resolved by the bundle's
+/// `images:` directive). `None` (`--skip-build` with no registry) leaves that
+/// default in place — unlike the old placeholder, it is a pullable image
+/// (research R3).
 pub async fn apply_manifests(client: &Client, image: Option<&str>) -> Result<()> {
-    let mut deployment_docs = parse_docs(DEPLOYMENT)?;
-    // Substitute the resolved image into each Deployment up front, before the
-    // immutable borrows below apply the (now-mutated) documents.
+    let mut docs = parse_docs(WEBHOOK_MANIFESTS)?;
+
+    // Skip the cert-manager Issuer/Certificate (see the doc comment above) —
+    // this tool manages its own TLS and the verification clusters have no
+    // cert-manager.
+    docs.retain(|d| !api_version_is(d, "cert-manager.io"));
+
+    // Substitute the resolved image into each Deployment before applying (the
+    // apply loop below borrows the docs immutably).
     if let Some(image_ref) = image {
-        for doc in deployment_docs
-            .iter_mut()
-            .filter(|d| kind_is(d, "Deployment"))
-        {
+        for doc in docs.iter_mut().filter(|d| kind_is(d, "Deployment")) {
             substitute_image(doc, image_ref);
         }
     }
-    let rbac_docs = parse_docs(RBAC)?;
-    let crd_docs = parse_docs(CRDS)?;
-    let webhook_docs = parse_docs(WEBHOOK_CONFIG)?;
 
-    // The Namespace lives in deployment.yaml; apply it before RBAC/CRDs (the
-    // ServiceAccount and webhook pods reference it).
-    let namespace_doc = deployment_docs
+    // Apply the Namespace first (RBAC + webhook pods reference it).
+    let namespace_doc = docs
         .iter()
         .find(|d| kind_is(d, "Namespace"))
-        .ok_or_else(|| err("deployment.yaml is missing its Namespace document"))?;
+        .ok_or_else(|| err("rendered webhook manifests are missing the Namespace document"))?;
     apply_doc(client, namespace_doc).await?;
 
-    for d in &rbac_docs {
-        apply_doc(client, d).await?;
-    }
-    for d in &crd_docs {
-        apply_doc(client, d).await?;
-    }
-    for d in deployment_docs.iter().filter(|d| !kind_is(d, "Namespace")) {
-        apply_doc(client, d).await?;
-    }
-    for d in &webhook_docs {
+    for d in docs.iter().filter(|d| !kind_is(d, "Namespace")) {
         apply_doc(client, d).await?;
     }
     info!(namespace = NAMESPACE, "webhook stack manifests applied");
@@ -232,6 +236,15 @@ fn parse_docs(manifest: &str) -> Result<Vec<serde_json::Value>> {
 
 fn kind_is(doc: &serde_json::Value, kind: &str) -> bool {
     doc.get("kind").and_then(|v| v.as_str()) == Some(kind)
+}
+
+/// Whether the document's `apiVersion` is for the given API group (e.g.
+/// `"cert-manager.io"` matches `cert-manager.io/v1`). Used to skip resources the
+/// verification clusters do not install (cert-manager).
+fn api_version_is(doc: &serde_json::Value, group: &str) -> bool {
+    doc.get("apiVersion")
+        .and_then(|v| v.as_str())
+        .is_some_and(|av| av == group || av.starts_with(&format!("{group}/")))
 }
 
 /// Set `spec.template.spec.containers[0].image` on a Deployment doc to the
@@ -450,7 +463,7 @@ mod tests {
 
     #[test]
     fn substitute_image_replaces_first_container_image() {
-        let mut doc = deployment_doc("ERW_IMAGE_PLACEHOLDER");
+        let mut doc = deployment_doc("aectann/emergency-ration-webhook:latest");
         substitute_image(&mut doc, "cr.yandex/abc/capacity-admission-webhook:latest");
         let image = doc["spec"]["template"]["spec"]["containers"][0]["image"]
             .as_str()

@@ -91,30 +91,40 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -keyout tls.key -out tls.crt \
             -days 1 -config csr.conf -extensions v3_req
 
-          # Create the namespace first — RBAC and the Deployment reference it.
+          # Create the namespace first — the TLS Secret and the webhook stack
+          # reference it.
           kubectl create namespace capacity-admission --dry-run=client -o yaml | kubectl apply -f -
 
-          kubectl apply -f deploy/rbac.yaml
-          kubectl apply -f deploy/crds.yaml
-
-          # Create the TLS Secret BEFORE the Deployment — the pods mount it
+          # Create the TLS Secret BEFORE the webhook stack — the pods mount it
           # at /tls and CrashLoopBackOff if it is not present at start time.
           kubectl -n capacity-admission create secret tls capacity-admission-webhook-tls \
             --cert=tls.crt --key=tls.key
 
-          # Patch the image placeholder to the kind-loaded tag BEFORE applying
-          # the Deployment, so pods are created with the correct image from the
-          # start (avoids ImagePullBackOff on :latest). spec-009 changed the
-          # manifest from a bare image name to ERW_IMAGE_PLACEHOLDER.
-          # Also set imagePullPolicy: IfNotPresent — kind loads the image
-          # locally; Always would try to pull from a registry (ImagePullBackOff).
-          sed -e 's|image: ERW_IMAGE_PLACEHOLDER|image: capacity-admission-webhook:e2e|' \
-              -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
-            deploy/deployment.yaml | kubectl apply -f -
-
-          CABUNDLE="$(base64 -w0 tls.crt)"
-          sed "s|# caBundle: .*|caBundle: ${CABUNDLE}|" deploy/webhook-config.yaml \
+          # Apply the webhook stack from the Kustomize bundle (manifest source of
+          # truth, spec-015). CI runs without cert-manager, so the cert-manager
+          # Issuer/Certificate (cert-setup.yaml) are filtered out of the render —
+          # CI uses the manually-generated TLS Secret above. Substitute the
+          # resolved default image (aectann/...:latest) for the kind-loaded :e2e
+          # tag and relax imagePullPolicy (kind loads the image locally; Always
+          # would try to pull from a registry → ImagePullBackOff).
+          kubectl kustomize deploy/kustomize/webhook \
+            | awk 'BEGIN{RS="\n---\n"; ORS="\n---\n"} !/apiVersion: cert-manager\.io/' \
+            | sed -e 's|aectann/emergency-ration-webhook:latest|capacity-admission-webhook:e2e|' \
+                  -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
             | kubectl apply -f -
+
+          # The rendered ValidatingWebhookConfiguration carries no caBundle
+          # (kustomize drops the source `# caBundle:` comment line), so inject it
+          # via a patch — the same field erw-verify's inject_ca_bundle sets.
+          # `--type=strategic` (the default) merges `webhooks[]` by name, setting
+          # only clientConfig.caBundle; `--type=merge` would replace the whole
+          # array and clobber failurePolicy/rules. The webhook's own namespace is
+          # excluded by the namespaceSelector, so its pods are not gated before
+          # this lands.
+          CABUNDLE="$(base64 -w0 tls.crt)"
+          kubectl patch validatingwebhookconfiguration capacity-admission.emergency-ration.dev \
+            --type=strategic \
+            -p '{"webhooks":[{"name":"capacity-admission.emergency-ration.dev","clientConfig":{"caBundle":"'"${CABUNDLE}"'"}}]}'
       - name: Wait for webhook readiness
         run: |
           if ! kubectl -n capacity-admission wait --for=condition=Ready pod \

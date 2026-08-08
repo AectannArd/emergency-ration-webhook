@@ -6,7 +6,7 @@
 
 The webhook reads seven settings from CLI flags, environment variables, and
 compiled defaults (source: [`src/config.rs`](../src/config.rs)). The
-[`deploy/deployment.yaml`](../deploy/deployment.yaml) `Deployment` supplies these
+[`deploy/kustomize/webhook/deployment.yaml`](../deploy/kustomize/webhook/deployment.yaml) `Deployment` supplies these
 via container `args`; the values there correspond to the compiled defaults shown
 below.
 

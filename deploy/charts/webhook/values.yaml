@@ -16,7 +16,7 @@ replicas: 2
 budget:
   defaultPercent: 80
 
-# Container resources (matches deploy/deployment.yaml defaults).
+# Container resources (matches deploy/kustomize/webhook/deployment.yaml defaults).
 resources:
   requests:
     cpu: 100m

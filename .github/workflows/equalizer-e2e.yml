@@ -26,8 +26,8 @@ on:
       - 'src/bin/capacity-equalizer/**'
       - 'src/crd/**'
       - 'src/webhook/admission.rs'
-      - 'deploy/equalizer/**'
-      - 'deploy/crds.yaml'
+      - 'deploy/kustomize/equalizer/**'
+      - 'deploy/kustomize/webhook/**'
       - 'Dockerfile.equalizer'
       - '.github/workflows/equalizer-e2e.yml'
 
@@ -112,19 +112,26 @@ jobs:
               -days 1 -config csr.conf -extensions v3_req
 
             kubectl create namespace capacity-admission --dry-run=client -o yaml | kubectl apply -f -
-            kubectl apply -f deploy/rbac.yaml
-            kubectl apply -f deploy/crds.yaml
 
             kubectl -n capacity-admission create secret tls capacity-admission-webhook-tls \
               --cert=tls-$i.crt --key=tls-$i.key
 
-            sed -e 's|image: ERW_IMAGE_PLACEHOLDER|image: capacity-admission-webhook:e2e|' \
-                -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
-              deploy/deployment.yaml | kubectl apply -f -
-
-            CABUNDLE="$(base64 -w0 tls-$i.crt)"
-            sed "s|# caBundle: .*|caBundle: ${CABUNDLE}|" deploy/webhook-config.yaml \
+            # Webhook stack from the Kustomize bundle (spec-015). cert-manager is
+            # not installed in CI, so filter the Issuer/Certificate out of the
+            # render; substitute the resolved default image for the kind-loaded
+            # :e2e tag and relax imagePullPolicy.
+            kubectl kustomize deploy/kustomize/webhook \
+              | awk 'BEGIN{RS="\n---\n"; ORS="\n---\n"} !/apiVersion: cert-manager\.io/' \
+              | sed -e 's|aectann/emergency-ration-webhook:latest|capacity-admission-webhook:e2e|' \
+                    -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
               | kubectl apply -f -
+
+            # The render has no caBundle (kustomize drops the source comment);
+            # inject it via a strategic patch (merges webhooks[] by name).
+            CABUNDLE="$(base64 -w0 tls-$i.crt)"
+            kubectl patch validatingwebhookconfiguration capacity-admission.emergency-ration.dev \
+              --type=strategic \
+              -p '{"webhooks":[{"name":"capacity-admission.emergency-ration.dev","clientConfig":{"caBundle":"'"${CABUNDLE}"'"}}]}'
 
             # Wait for webhook readiness.
             if ! kubectl -n capacity-admission wait --for=condition=Ready pod \
@@ -185,7 +192,8 @@ jobs:
               resources: ["clustercapacities"]
               verbs: ["get"]
           EOF
-          kubectl apply -f deploy/equalizer/rbac.yaml
+          # The capacity-equalizer RBAC now ships in the equalizer Kustomize
+          # render applied in the "Deploy equalizer" step below.
 
           # For each target cluster, create a ServiceAccount with the right
           # RBAC, extract its token, build a kubeconfig, and store it as a
@@ -199,7 +207,7 @@ jobs:
             export KUBECONFIG="$TARGET_KUBECONFIG"
 
             # Create the target-cluster ServiceAccount + RBAC (the commented
-            # block from deploy/equalizer/rbac.yaml, now applied for real).
+            # block from deploy/kustomize/equalizer/rbac.yaml, applied for real).
             kubectl apply -f - <<EOF
           apiVersion: v1
           kind: ServiceAccount
@@ -298,7 +306,7 @@ jobs:
 
           # Grant the home SA the same target-cluster RBAC (it manages its own
           # Allocation too) + read Secrets + manage EqualizerConfig (already
-          # granted by deploy/equalizer/rbac.yaml's ClusterRole).
+          # granted by deploy/kustomize/equalizer/rbac.yaml's ClusterRole).
           kubectl apply -f - <<EOF
           apiVersion: rbac.authorization.k8s.io/v1
           kind: ClusterRoleBinding
@@ -367,13 +375,16 @@ jobs:
           kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
           export KUBECONFIG="/tmp/kc-eq_home.yaml"
 
-          # Apply the EqualizerConfig CRD.
-          kubectl apply -f deploy/equalizer/crds.yaml
-
-          # Patch the equalizer deployment image + imagePullPolicy.
-          sed -e 's|image: ERW_EQUALIZER_IMAGE_PLACEHOLDER|image: capacity-equalizer:e2e|' \
-              -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
-            deploy/equalizer/deployment.yaml | kubectl apply -f -
+          # Apply the equalizer stack (namespace + EqualizerConfig CRD + RBAC +
+          # Deployment) from the Kustomize bundle (manifest source of truth,
+          # spec-015). The equalizer render has no cert-manager resources, so
+          # unlike the webhook bundle it needs no filtering. Substitute the
+          # resolved default image for the kind-loaded :e2e tag and relax
+          # imagePullPolicy (kind loads the image locally).
+          kubectl kustomize deploy/kustomize/equalizer \
+            | sed -e 's|aectann/emergency-ration-equalizer:latest|capacity-equalizer:e2e|' \
+                  -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
+            | kubectl apply -f -
 
           # Create the EqualizerConfig singleton with 4 targets (home + 3).
           kubectl apply -f - <<EOF
