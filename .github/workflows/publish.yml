@@ -1,4 +1,4 @@
-# Publish the webhook container image to Docker Hub (spec-011).
+# Publish container images to Docker Hub (spec-011, constitution Principle XV).
 #
 # Triggers:
 #   push of a semver git tag  → multi-arch build + push.
@@ -10,9 +10,11 @@
 # Two jobs:
 #   quality — re-runs the Rust gate (fmt + clippy + test), mirroring ci.yml's
 #     quality job so a red gate blocks publishing (FR-013).
-#   publish — gated on the canonical repo (FR-009); builds linux/amd64 +
-#     linux/arm64 (FR-003) and pushes a single multi-arch manifest to
-#     aectann/emergency-ration-webhook (FR-011). Depends on `quality`.
+#   publish — gated on the canonical repo (FR-009); a matrix builds each
+#     containerised artifact listed in ARTIFACTS.md (webhook + equalizer) for
+#     linux/amd64 + linux/arm64 (FR-003) and pushes a multi-arch manifest per
+#     image. Depends on `quality`. Adding a new Docker artifact (Principle XV)
+#     means adding an entry to the publish matrix below.
 
 name: Publish to Docker Hub
 
@@ -49,10 +51,20 @@ jobs:
         run: cargo test
 
   publish:
-    name: Build & push multi-arch image
+    name: Build & push ${{ matrix.binary }}
     needs: quality
     if: github.repository == 'AectannArd/emergency-ration-webhook'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - binary: capacity-admission-webhook
+            dockerfile: Dockerfile
+            image: aectann/emergency-ration-webhook
+          - binary: capacity-equalizer
+            dockerfile: Dockerfile.equalizer
+            image: aectann/emergency-ration-equalizer
     steps:
       - name: Checkout (shallow — no history needed for a build)
         uses: actions/checkout@v4
@@ -77,7 +89,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: aectann/emergency-ration-webhook
+          images: ${{ matrix.image }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
@@ -87,6 +99,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

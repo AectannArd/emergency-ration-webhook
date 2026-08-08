@@ -1,6 +1,8 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.5.0 → 2.6.0 (MINOR — Principle XIII added: Separation of Usage and Contribution Documentation)
+Version change: 2.7.0 → 2.8.0 (MINOR — Principle XV added: Build and Publish Procedure for Every Docker Artifact)
+  Prior: 2.6.0 → 2.7.0 (MINOR — Principle XIV added: Artifact Inventory)
+  Prior: 2.5.0 → 2.6.0 (MINOR — Principle XIII added: Separation of Usage and Contribution Documentation)
   Prior: 2.4.0 → 2.5.0 (MINOR — Principle XII added: Scratch Space for Agent Intercommunication)
   Prior: 2.3.0 → 2.4.0 (MINOR — Principle XI added: CI-Green Completion Gate)
   Prior: 2.2.0 → 2.3.0 (MINOR — Principle X added: User-Facing Functionality Documented in README.md)
@@ -13,25 +15,27 @@ Version change: 2.5.0 → 2.6.0 (MINOR — Principle XIII added: Separation of U
   Prior: 1.2.0 → 1.3.0 (integration test framework locked + deferred detail ported)
   Prior: 1.3.0 → 1.4.0 (Principle VIII: Test-First Development)
 Modified principles (vs remote v1.0.0):
-  - II. Fail-Safe by Design → I. Fail-Closed by Default (NON-NEGOTIABLE).
-  - V. Simplicity and YAGNI → V. Separated Concerns, Minimal Surface (NON-NEGOTIABLE).
+  - II. Fail-Safe by Design → I. Fail-Closed by Default.
+  - V. Simplicity and YAGNI → V. Separated Concerns, Minimal Surface.
     The single-webhook model is replaced by a 3-component operator architecture
     (Node Capacity Controller + Allocation Controller + Admission Webhook),
     linked by CRDs as shared state. The 'no CRDs for v1' constraint is lifted.
     Rationale: node lifecycle and pod lifecycle are independent processes with
     different risk profiles; conflating them couples what should be separated.
-    This is a MAJOR bump because Principle V was NON-NEGOTIABLE and its core
+    This is a MAJOR bump because Principle V was a core founding principle and its core
     stance (single component, no CRDs) is redefined.
 Added principles:
   - v1.0.0: Principles I–IV (initial ratification; renamed/reordered here)
   - v1.1.0: VI — Integration Test Coverage of Main and Exceptional Workflows
   - v1.2.0: VII — Kubernetes Version Support Window (N-2)
-  - v1.4.0: VIII — Test-First Development (NON-NEGOTIABLE)
+  - v1.4.0: VIII — Test-First Development
   - v2.1.0: IX — Editor Configuration as Code
   - v2.3.0: X — User-Facing Functionality Documented in README.md
   - v2.4.0: XI — CI-Green Completion Gate
   - v2.5.0: XII — Scratch Space for Agent Intercommunication
   - v2.6.0: XIII — Separation of Usage and Contribution Documentation
+  - v2.7.0: XIV — Artifact Inventory
+  - v2.8.0: XV — Build and Publish Procedure for Every Docker Artifact
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -57,8 +61,8 @@ Modified in v2.4.0:
     whether the failure is in the changed code or pre-existing
     infrastructure.
 Added sections (cumulative):
-  - Core Principles I–XII
-  - Core Principles I–XIII
+  - Core Principles I–XIV
+  - Core Principles I–XV
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -75,7 +79,7 @@ Follow-up TODOs: none.
 
 ## Core Principles
 
-### I. Fail-Closed by Default (NON-NEGOTIABLE)
+### I. Fail-Closed by Default
 
 The webhook exists to prevent cluster overcommit. When it cannot authoritatively
 verify that a workload fits within the configured capacity budget — for any
@@ -88,7 +92,7 @@ timeout exceeded, deserialization error) — it MUST reject the admission reques
 - Rationale: a capacity guardian that admits when it cannot measure has failed
   its only job. Cluster stability outranks deploy throughput.
 
-### II. Capacity as a Hard Budget (NON-NEGOTIABLE)
+### II. Capacity as a Hard Budget
 
 CPU and RAM are tracked against a configurable percentage ceiling of cluster
 capacity. Admission decisions are deterministic budget checks, not heuristics
@@ -138,7 +142,7 @@ first-class observability events.
 - Rationale: a capacity controller that cannot explain its own decisions cannot
   be trusted in production or debugged during an incident.
 
-### V. Separated Concerns, Minimal Surface (NON-NEGOTIABLE)
+### V. Separated Concerns, Minimal Surface
 
 The capacity guardian separates two independent cluster processes — node
 lifecycle (capacity supply) and pod lifecycle (capacity consumption) — into
@@ -217,7 +221,7 @@ current release plus the two preceding — i.e. N, N-1, N-2).
   admission webhook that only runs on the latest version is a forced upgrade
   dependency. N-2 is the standard community support window.
 
-### VIII. Test-First Development (NON-NEGOTIABLE)
+### VIII. Test-First Development
 
 Development is test-first (TDD), not merely test-required. Tests are written
 BEFORE implementation and watched to fail; only then is the minimal code
@@ -404,6 +408,73 @@ the other's content.
   image-build automation added substantial build/test/verify documentation that
   belongs in the contributor's guide, not in the operator's README.
 
+### XIV. Artifact Inventory
+
+Every binary the repository produces MUST be enumerated in a dedicated
+`ARTIFACTS.md` file at the repository root, and each entry MUST explicitly
+state whether the binary is published as a Docker image or not.
+
+- **Scope**: a "binary" is any `[[bin]]` target declared in `Cargo.toml`
+  (or equivalent build manifest for non-Rust components). The library crate
+  (`[lib]`) is not a binary and is out of scope.
+- **Per-binary disclosure**: each entry MUST record:
+  1. The binary name and source path.
+  2. Whether it produces a Docker image (yes/no).
+  3. If yes: the `Dockerfile`, the image repository, and the publishing
+     mechanism (e.g. GitHub Actions workflow).
+  4. If no: a one-line rationale (e.g. "CLI tool, not a deployed workload").
+- **Same-change rule**: adding, renaming, or removing a `[[bin]]` target, or
+  adding/removing a Docker image for an existing binary, MUST update
+  `ARTIFACTS.md` in the same change (same commit / PR). A `[[bin]]` landing
+  without a matching `ARTIFACTS.md` delta is incomplete and MUST be blocked at
+  review — the same standard as the README rule (Principle X) and the
+  test-first rule (Principle VIII).
+- **`ARTIFACTS.md` is the single source of truth**: the README, CONTRIBUTING,
+  and specs MAY link to it but MUST NOT duplicate the inventory. When a doc
+  and `ARTIFACTS.md` disagree, `ARTIFACTS.md` wins.
+- **Rationale**: the repository produces multiple binaries with different
+  deployment profiles (long-running server, separate controller, CLI tool).
+  Without a single explicit inventory, it is unclear which binaries are
+  containerised, which Dockerfiles exist, and which images are published —
+  exactly the gap that left the equalizer binary without a publish workflow
+  after it was added. Making the inventory a first-class, mandated document
+  closes this gap by construction: every new binary is declared, and its
+  containerisation status is explicit, never implicit.
+
+### XV. Build and Publish Procedure for Every Docker Artifact
+
+Every binary marked as producing a Docker image in `ARTIFACTS.md` MUST have an
+explicitly defined, reproducible build and publish procedure. A Dockerfile
+without a publish mechanism is an incomplete deliverable.
+
+- **Scope**: this principle applies to every artifact whose "Docker image"
+  column in `ARTIFACTS.md` is "Yes". Artifacts marked "No" (e.g. CLI tools)
+  are out of scope.
+- **Required elements**: for each containerised artifact, the repository MUST
+  define:
+  1. **Build**: the Dockerfile (or equivalent) that produces the image.
+  2. **Publish**: the mechanism that pushes the image to a registry — a CI
+     workflow, a script, or a documented manual procedure.
+  3. **Registry and repository**: the destination image repository (e.g.
+     `aectann/emergency-ration-webhook`) recorded in `ARTIFACTS.md`.
+  4. **Tagging strategy**: how image tags are derived (semver git tag,
+     commit SHA, `latest`), documented alongside the publish mechanism.
+- **Same-change rule**: adding a Dockerfile or flipping an artifact's image
+  status to "Yes" in `ARTIFACTS.md` MUST land with a publish procedure in the
+  same change (same commit / PR). A Dockerfile without a corresponding publish
+  step is incomplete and MUST be blocked at review — the same standard as the
+  artifact inventory rule (Principle XIV) and the README rule (Principle X).
+- **No orphan Dockerfiles**: a `Dockerfile.*` in the repository root that has
+  no publish procedure is a defect. Either wire it into a publish mechanism or
+  remove it; leaving it unmentioned is not acceptable.
+- **Rationale**: the equalizer binary received a `Dockerfile.equalizer` during
+  its initial implementation but no publish workflow was added — the image was
+  buildable locally but never reachable from CI or a registry. An operator
+  pulling the image list from `ARTIFACTS.md` would see "Yes" next to the
+  equalizer but find no way to obtain the published image. Requiring the
+  publish procedure to land with the Dockerfile eliminates this class of gap:
+  if the image is declared, the procedure to build and ship it is declared too.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -513,4 +584,4 @@ the other's content.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.6.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-07-28
+**Version**: 2.8.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-08-08

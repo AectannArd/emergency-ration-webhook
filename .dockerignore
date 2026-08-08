@@ -1,0 +1,15 @@
+# Exclude heavy/irrelevant dirs from the Docker build context.
+# The Dockerfile only needs the Rust source — not build artifacts,
+# git history, specs, or editor config.
+target/
+.git/
+.specify/
+.temp/
+.github/
+.claude/
+*.md
+specs/
+# spec-009: never bake operator .env config into the image. The webhook image
+# needs only the Rust source; .env is consumed by erw-verify at run time.
+.env
+.env.*
