@@ -170,6 +170,21 @@ jobs:
           export KUBECONFIG="/tmp/kc-eq_home.yaml"
           # Create the equalizer namespace + RBAC in the home cluster.
           kubectl create namespace capacity-equalizer --dry-run=client -o yaml | kubectl apply -f -
+          # Create the target-cluster ClusterRole in the HOME cluster too — the
+          # home-cluster SA needs it to read/patch its own Allocation singleton.
+          kubectl apply -f - <<EOF
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: capacity-equalizer-target
+          rules:
+            - apiGroups: ["emergency-ration.dev"]
+              resources: ["allocations"]
+              verbs: ["get", "patch"]
+            - apiGroups: ["emergency-ration.dev"]
+              resources: ["clustercapacities"]
+              verbs: ["get"]
+          EOF
           kubectl apply -f deploy/equalizer/rbac.yaml
 
           # For each target cluster, create a ServiceAccount with the right
