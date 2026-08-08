@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ template "webhook.name" . }}
+  namespace: {{ template "webhook.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ template "webhook.name" . }}
+rules:
+  # Capacity supply: observe nodes (read-only).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Capacity demand: observe pod resource requests (read-only).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # ClusterCapacity CRD: auto-create the singleton + write its status.
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["clustercapacities"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["clustercapacities/status"]
+    verbs: ["get", "update", "patch"]
+  # Allocation CRD: auto-create the singleton + read budget + write its status.
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["allocations"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["emergency-ration.dev"]
+    resources: ["allocations/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ template "webhook.name" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ template "webhook.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "webhook.name" . }}
+    namespace: {{ template "webhook.namespace" . }}
