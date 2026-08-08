@@ -16,6 +16,7 @@ RUN mkdir -p src/bin/erw-verify src/bin/capacity-equalizer && \
     echo "fn main() {}" > src/main.rs && \
     echo "" > src/lib.rs && \
     echo "fn main() {}" > src/bin/erw-verify/main.rs && \
+    echo "fn main() {}" > src/bin/erw-verify/build.rs && \
     echo "fn main() {}" > src/bin/capacity-equalizer/main.rs && \
     cargo build --release && \
     rm -rf src

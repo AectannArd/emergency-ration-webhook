@@ -29,10 +29,15 @@ fn main() {
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
     let kustomize_dir = manifest_dir.join(WEBHOOK_KUSTOMIZE_DIR);
 
+    let out_dir =
+        PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR for build scripts"));
+
     // Prefer the standalone `kustomize` binary; fall back to `kubectl kustomize`
     // (kubectl bundles kustomize and is ubiquitous on CI runners) when it is
-    // absent. A missing PATH entry is `or_else`'d into the fallback; only a
-    // missing binary *and* a failed fallback panic.
+    // absent. If neither is available (e.g. inside a Docker build of a
+    // different binary that doesn't consume these manifests), write an empty
+    // placeholder and emit a warning — only `erw-verify` needs the rendered
+    // manifests at compile time; the webhook and equalizer binaries ignore them.
     let output = Command::new("kustomize")
         .arg("build")
         .arg(&kustomize_dir)
@@ -42,35 +47,43 @@ fn main() {
                 .arg("kustomize")
                 .arg(&kustomize_dir)
                 .output()
-        })
-        .expect(
-            "failed to render the webhook Kustomize bundle: neither `kustomize` nor `kubectl` \
-             was found on PATH. Install one of them (kubectl bundles kustomize) and rebuild.",
-        );
+        });
 
-    assert!(
-        output.status.success(),
-        "rendering the webhook Kustomize bundle failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    match output {
+        Ok(output) if output.status.success() => {
+            fs::write(out_dir.join(RENDERED_FILE), &output.stdout)
+                .expect("write rendered webhook manifests to OUT_DIR");
+        }
+        Ok(output) => {
+            panic!(
+                "rendering the webhook Kustomize bundle failed:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        Err(_) => {
+            println!(
+                "cargo:warning=neither `kustomize` nor `kubectl` found on PATH; \
+                 writing empty webhook-manifests.yaml placeholder. \
+                 Only `erw-verify` needs the rendered manifests — \
+                 install kustomize/kubectl if building erw-verify."
+            );
+            fs::write(out_dir.join(RENDERED_FILE), "")
+                .expect("write placeholder webhook manifests to OUT_DIR");
+        }
+    }
 
-    let out_dir =
-        PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR for build scripts"));
-    fs::write(out_dir.join(RENDERED_FILE), &output.stdout)
-        .expect("write rendered webhook manifests to OUT_DIR");
-
-    // Re-render whenever a file in the bundle changes. `cargo:rerun-if-changed`
-    // on a directory path watches only the directory's own mtime (add/remove of
-    // direct children) — it does NOT catch content edits, so list every file in
-    // the bundle explicitly. Sort for a deterministic directive ordering.
-    let mut paths: Vec<PathBuf> = fs::read_dir(&kustomize_dir)
-        .expect("read the webhook Kustomize bundle directory")
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|p| p.is_file())
-        .collect();
-    paths.sort();
-    for path in &paths {
-        println!("cargo:rerun-if-changed={}", path.display());
+    // Re-render whenever a file in the bundle changes.
+    if kustomize_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&kustomize_dir)
+    {
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_file())
+            .collect();
+        paths.sort();
+        for path in &paths {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
 }
