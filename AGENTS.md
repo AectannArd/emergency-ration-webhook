@@ -6,10 +6,9 @@ at specs/014-readme-docs-hub-split/plan.md
 
 # Project: emergency-ration-webhook
 
-A Kubernetes admission webhook that tracks cluster capacity (CPU and RAM) and
-ensures scheduled workloads do not exceed a configurable capacity percentage.
-See `IDEA.md` for the original one-line description; the authoritative spec
-lives under `specs/` once `/speckit-specify` has been run.
+A Kubernetes admission webhook and multi-cluster capacity equalizer that track
+cluster capacity (CPU and RAM) and ensure scheduled workloads do not exceed a
+configurable capacity percentage. The authoritative spec lives under `specs/`.
 
 ## Your role: Hermes (specification & planning)
 
