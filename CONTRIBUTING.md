@@ -133,6 +133,31 @@ See [`AGENTS.md`](./AGENTS.md) for the full agent-split workflow.
 - No host paths or machine-specific paths in tracked files. The repository is
   portable across development setups.
 
+## Documentation Structure
+
+This repository follows a documentation **hub** model (Constitution Principle X):
+
+- [`README.md`](./README.md) is the hub — a project overview, a self-contained
+  quick start, and a Table of Contents with a 1–3 sentence summary for each
+  capability. It is an operator's first screen, not a wall of reference text.
+- [`docs/`](./docs/) holds the detailed operator-facing reference, one article per
+  capability (deployment, configuration, observability, and so on). The
+  [`docs/README.md`](./docs/README.md) index lists every article with a one-line
+  description.
+- This file (`CONTRIBUTING.md`) holds contributor content (build, test, quality
+  gate, project structure) — it does not duplicate operator reference.
+
+**Documentation obligation.** A change that adds or changes a user-facing
+capability is not complete until the documentation reflects it, in the **same
+pull request**:
+
+1. Create or update the `docs/<topic>.md` article for the capability.
+2. Add or update the matching entry in the README's `## Documentation` table of
+   contents (a 1–3 sentence summary + link).
+
+Both happen together — an article with no README entry is unreachable, and a
+README summary with no article behind it is a dead link.
+
 ## Project Structure
 
 ```text
