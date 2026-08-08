@@ -496,9 +496,18 @@ jobs:
           # Wait for the controller to recompute the ceiling.
           sleep 3
 
-          # Request ~90% of the cluster's CPU in a single pod.
-          LOAD_CPU=$((TOTAL_CPU * 90 / 100))
-          echo "Creating load pod requesting ${LOAD_CPU}m CPU on cluster-3..."
+          # Request enough CPU to push cluster-3 to ~90% utilization.
+          # The existing allocation + new request must be <= 100% of total
+          # (the temporary 100% budget allows up to the full capacity).
+          ALLOCATED=$(kubectl get allocation cluster-allocation \
+            -o jsonpath='{.status.allocatedCpuMilli}' 2>/dev/null)
+          echo "cluster-3 currently allocated: ${ALLOCATED:-0}m"
+          TARGET_ALLOCATED=$((TOTAL_CPU * 90 / 100))
+          LOAD_CPU=$((TARGET_ALLOCATED - ALLOCATED))
+          if [ "$LOAD_CPU" -lt 100 ]; then
+            LOAD_CPU=100  # minimum meaningful load
+          fi
+          echo "Creating load pod requesting ${LOAD_CPU}m CPU (target total ${TARGET_ALLOCATED}m = 90% of ${TOTAL_CPU}m)..."
           kubectl apply -f - <<EOF
           apiVersion: v1
           kind: Pod
