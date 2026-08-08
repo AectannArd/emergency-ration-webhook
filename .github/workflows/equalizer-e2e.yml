@@ -485,6 +485,17 @@ jobs:
             -o jsonpath='{.status.totalAllocatableCpuMilli}' 2>/dev/null)
           echo "cluster-3 total allocatable CPU: ${TOTAL_CPU}m"
 
+          # The webhook enforces the 80% budget set in Scenario 1, so a pod
+          # requesting 90% would be denied. Temporarily raise cluster-3's
+          # cpuBudgetPercent to 100 to allow the overload pod, then remove the
+          # override so the equalizer recalculates from scratch.
+          echo "Temporarily raising cluster-3 budget to 100% to admit the load pod..."
+          kubectl patch allocation cluster-allocation --type=merge \
+            -p '{"spec":{"cpuBudgetPercent":100,"memoryBudgetPercent":100}}'
+
+          # Wait for the controller to recompute the ceiling.
+          sleep 3
+
           # Request ~90% of the cluster's CPU in a single pod.
           LOAD_CPU=$((TOTAL_CPU * 90 / 100))
           echo "Creating load pod requesting ${LOAD_CPU}m CPU on cluster-3..."
