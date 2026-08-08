@@ -51,4 +51,5 @@ long-running workload.
 - **Image**: none (CLI tool, run from a local build or `cargo run`)
 - **Build**: `cargo build --release --bin erw-verify`
 - **Usage**: see [CONTRIBUTING.md](../CONTRIBUTING.md) and the
-  [verification scenarios](../README.md#verification-scenarios) in the README
+  [verification scenarios](../docs/erw-verify.md#scenario-inventory) in the
+  verification guide
