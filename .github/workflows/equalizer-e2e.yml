@@ -169,6 +169,7 @@ jobs:
           kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
           export KUBECONFIG="/tmp/kc-eq_home.yaml"
           # Create the equalizer namespace + RBAC in the home cluster.
+          kubectl create namespace capacity-equalizer --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f deploy/equalizer/rbac.yaml
 
           # For each target cluster, create a ServiceAccount with the right
