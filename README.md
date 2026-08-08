@@ -986,8 +986,13 @@ only emitted once the tool reaches the report phase.
 
 ### Scenario Inventory
 
-The tool runs a fixed set of enforcement scenarios. Each prints a ✓/✗/○ block with
-timing and a detail line; the report ends with a summary and the exit code.
+The tool runs a fixed set of scenarios across three groups. Each prints a ✓/✗/○
+block with timing and a detail line; the report ends with a summary and the exit
+code. Enforcement and degradation scenarios always run; equalizer scenarios
+require target-cluster kubeconfigs via `ERW_EQUALIZER_TARGET_KUBECONFIG_*` env
+vars (skipped otherwise).
+
+#### Enforcement (S1–S9)
 
 | ID | Scenario | Asserts |
 |----|----------|---------|
@@ -1001,10 +1006,33 @@ timing and a detail line; the report ends with a summary and the exit code.
 | S8 | metrics + health endpoints | `/healthz` and `/metrics` respond via the API proxy |
 | S9 | per-resource asymmetric budgets | asymmetric `cpuBudgetPercent`/`memoryBudgetPercent` deny on memory only |
 
-Degradation scenarios (kill webhook pods, delete CRD instances, induce stale
-capacity data) are planned for a follow-up phase; see
-[`specs/005-on-demand-verification/`](./specs/005-on-demand-verification/) and the
-[quickstart](./specs/005-on-demand-verification/quickstart.md) for the full design.
+#### Degradation (S10–S11)
+
+| ID | Scenario | Asserts |
+|----|----------|---------|
+| S10 | degradation + restore | killing webhook pods and deleting CRD instances is recovered from, and capacity-data-missing rejection transitions back to normal admission |
+| S11 | stale capacity data | stale ClusterCapacity data is rejected (fail-closed) and recovers when fresh data arrives |
+
+See [`specs/010-s10-degradation-restore-fix/`](./specs/010-s10-degradation-restore-fix/)
+for the degradation scenario design.
+
+#### Equalizer / cross-cluster (E1–E5)
+
+Opt-in: requires `ERW_EQUALIZER_TARGET_KUBECONFIG_1`, `_2`, etc. pointing to
+target-cluster kubeconfig files. Skipped (○, not ✗) when absent — standard
+single-cluster runs are unaffected. See
+[CONTRIBUTING.md § Cross-cluster verification](./CONTRIBUTING.md#cross-cluster-verification-e1-e5).
+
+| ID | Scenario | Asserts |
+|----|----------|---------|
+| E1 | all clusters within target | the equalizer patches every cluster's `cpuBudgetPercent` to the target when all are under |
+| E2 | over-cluster compensation | pushing one cluster over target freezes it and lowers the others to compensate |
+| E3 | unreachable cluster handling | corrupting a kubeconfig Secret marks the cluster `Unreachable`; others remain managed |
+| E4 | EqualizerConfig status shape | all per-cluster observation fields + fleet condition are populated |
+| E5 | cleanup | EqualizerConfig, equalizer Deployment, and kubeconfig Secrets are removed |
+
+See [`specs/013-multi-cluster-capacity-equalizer/`](./specs/013-multi-cluster-capacity-equalizer/)
+for the equalizer scenario design.
 
 ## Development
 
@@ -1055,7 +1083,7 @@ src/
 ├── metrics.rs           # the 8 Prometheus metrics on one registry
 ├── time_util.rs         # RFC 3339 parsing / formatting
 ├── crd/
-│   ├── allocation.rs        # Allocation CRD (spec.budgetPercent + status)
+│   ├── allocation.rs        # Allocation CRD (spec.budgetPercent + per-resource overrides + status)
 │   └── cluster_capacity.rs  # ClusterCapacity CRD (status only)
 ├── controllers/
 │   ├── node_capacity.rs     # supply side: nodes → ClusterCapacity status
@@ -1074,7 +1102,7 @@ src/bin/erw-verify/          # on-demand verification tool (spec-005): separate 
 ├── setup.rs                 # apply manifests, self-signed TLS cert (rcgen), caBundle, readiness, pre-flight
 ├── teardown.rs              # reverse-order deletion
 ├── report.rs                # pure human/JSON report rendering
-└── scenarios/               # enforcement scenarios S1-S9
+└── scenarios/               # enforcement S1-S9 + degradation S10-S11 + equalizer E1-E5 (cross-cluster)
 deploy/                      # Kubernetes manifests (crds, rbac, deployment, webhook-config, cert-setup)
 tests/                       # integration (tower-test mocked apiserver) + BDD (cucumber-rs) + verify (unit)
 ```
