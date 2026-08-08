@@ -1,0 +1,32 @@
+# Kustomize bundle for the multi-cluster capacity equalizer (spec-015).
+#
+# Manifest source of truth: the resources below are the pre-migration raw
+# manifests copied verbatim, with only the container image field parameterised
+# (capacity-equalizer:placeholder, resolved by the `images:` directive).
+# Override the image at apply time:
+#
+#   kustomize edit set image \
+#     capacity-equalizer=aectann/emergency-ration-equalizer:v1.0.0
+#   kustomize build | kubectl apply -f -
+#
+# or, without modifying files (CI pattern):
+#
+#   kubectl kustomize deploy/kustomize/equalizer \
+#     | sed 's|capacity-equalizer:latest|capacity-equalizer:v1.0.0|' \
+#     | kubectl apply -f -
+#
+# example-config.yaml is deliberately NOT listed in `resources:` — it is
+# documentation (contains BASE64_KUBECONFIG_* placeholders), not a default-applied
+# resource (research R10). Apply it separately after install if needed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - crds.yaml
+  - deployment.yaml
+  - rbac.yaml
+
+images:
+  - name: capacity-equalizer
+    newName: aectann/emergency-ration-equalizer
+    newTag: latest

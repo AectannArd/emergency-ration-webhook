@@ -1,0 +1,30 @@
+# Kustomize bundle for the capacity admission webhook (spec-015).
+#
+# Manifest source of truth: the resources below are the pre-migration raw
+# manifests copied verbatim, with only the container image field parameterised
+# (capacity-admission-webhook:placeholder, resolved by the `images:` directive).
+# Override the image at apply time:
+#
+#   kustomize edit set image \
+#     capacity-admission-webhook=aectann/emergency-ration-webhook:v1.0.0
+#   kustomize build | kubectl apply -f -
+#
+# or, without modifying files (CI pattern):
+#
+#   kubectl kustomize deploy/kustomize/webhook \
+#     | sed 's|capacity-admission-webhook:latest|capacity-admission-webhook:v1.0.0|' \
+#     | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - crds.yaml
+  - deployment.yaml
+  - rbac.yaml
+  - webhook-config.yaml
+  - cert-setup.yaml
+
+images:
+  - name: capacity-admission-webhook
+    newName: aectann/emergency-ration-webhook
+    newTag: latest
