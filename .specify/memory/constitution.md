@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.7.0 → 2.8.0 (MINOR — Principle XV added: Build and Publish Procedure for Every Docker Artifact)
+Version change: 2.8.0 → 2.9.0 (MINOR — Principle X redefined: README as Documentation Hub with docs/ Articles)
+  Prior: 2.7.0 → 2.8.0 (MINOR — Principle XV added: Build and Publish Procedure for Every Docker Artifact)
   Prior: 2.6.0 → 2.7.0 (MINOR — Principle XIV added: Artifact Inventory)
   Prior: 2.5.0 → 2.6.0 (MINOR — Principle XIII added: Separation of Usage and Contribution Documentation)
   Prior: 2.4.0 → 2.5.0 (MINOR — Principle XII added: Scratch Space for Agent Intercommunication)
@@ -46,6 +47,19 @@ Modified in v2.0.0:
     via CRD spec; Capacity inputs sourced via controllers.
   - Principle VI: envtest rejection rationale updated (was 'Principle V grounds',
     now just 'Go toolchain cost').
+Modified in v2.9.0:
+  - Principle X: rewritten — README as Documentation Hub with docs/ Articles.
+    The README is now the navigational hub (project description, quick-start, TOC,
+    and brief per-capability summaries that link to docs/). Detailed configuration,
+    deployment, operational, and architecture reference lives in separate
+    docs/ articles. The previous model (README MUST "itself cover the essentials"
+    with docs/ only for "deeper reference material") is replaced — the README
+    summarizes and links; docs/ holds the depth. MINOR bump because the principle's
+    mandate is materially expanded (new structural split requirement), not removed.
+  - Principle XIII: README bullet updated to reflect the hub model (quickstart +
+    TOC + summaries linking to docs/, detailed reference in docs/ per Principle X).
+  - Development Workflow: documentation-as-deliverable bullet updated —
+    "discoverable from README.md, with detailed reference in docs/ articles."
 Modified in v2.1.0:
   - Development Workflow: quality gate now requires .editorconfig compliance.
 Modified in v2.2.0:
@@ -274,35 +288,70 @@ not by ad-hoc convention or review nitpicks.
   Declaring the rules in a machine-readable, editor-agnostic file removes the
   entire class of disagreement at the source.
 
-### X. User-Facing Functionality is Documented in README.md
+### X. README as Documentation Hub with docs/ Articles
 
 Every user-facing capability of the webhook — installation, configuration,
-deployment, and operational behaviour — MUST be documented in the repository's
-`README.md`. A feature is not complete until a human operator can discover,
-configure, and operate it from the README alone.
+deployment, and operational behaviour — MUST be documented and discoverable from
+the repository's `README.md`. The README is the navigational hub and entry point;
+detailed reference material lives in separate articles under `docs/`.
 
-- "User-facing" means anything an operator or integrator interacts with:
-  command-line flags, environment variables, the webhook's admission behaviour,
-  CRD `spec`/`status` fields, exposed metrics, structured-log keys, deployment
-  manifests, and upgrade or deprecation notes.
-- The README is the single entry point for user-facing documentation; deeper
-  reference material MAY live in `docs/`, but the README MUST link to it and MUST
-  itself cover the essentials. A capability documented only in code, specs, or
-  commit messages is not documented.
-- A change that adds or alters user-facing functionality MUST update `README.md`
-  in the same change (same commit / PR). A PR that ships user-facing behaviour
-  without a README delta is incomplete and MUST be blocked at review — the same
-  standard as the test-first rule (Principle VIII) and the `.editorconfig` rule
-  (Principle IX).
-- Documentation is treated like code: versioned, reviewed, and, where feasible,
-  verified (e.g. quickstart steps that are runnable in CI). Stale or inaccurate
-  documentation is a defect, not a cosmetic issue.
-- Rationale: an admission webhook is infrastructure operators trust on the
-  critical path. Undocumented configuration, flags, or failure behaviour is an
-  operational hazard — operators cannot safely deploy, tune, or debug what they
-  cannot read about. Making the README a first-class deliverable, updated in
-  lockstep with the feature, keeps the source of truth from drifting from the
-  software.
+**README.md scope (the hub):**
+- A project description: what the software is and does.
+- A quick-start section: the minimal path from clone to a running, verified
+  deployment (install, deploy, verify — concise, not exhaustive).
+- A table of contents linking to every article in `docs/`.
+- For each major capability, a brief (1–3 sentence) summary that links to its
+  detailed article in `docs/`.
+
+**docs/ scope (the detail):**
+- Full configuration reference (CLI flags, environment variables, CRD
+  spec/status fields with examples).
+- Deployment manifests and procedures (TLS provisioning, RBAC, multi-component
+  topology, multi-cluster setup).
+- Operational reference (metrics catalog, structured-log keys, failure-mode
+  catalog, enforcement modes, workload exclusion, budget overrides).
+- Architecture and component design.
+- Tooling reference (verification CLI usage, scenario inventory).
+- Any capability whose documentation exceeds a few paragraphs belongs in
+  `docs/`, not in the README.
+
+**The split is structural, not cosmetic.** When the README grows to the point
+that a reader must scroll past unrelated sections to reach the one they need, the
+overflowing section MUST be extracted into a `docs/` article and replaced with a
+summary + link. A monolithic README that mixes quick-start with deep reference
+serves neither the first-time operator (overwhelmed) nor the experienced operator
+(hunting through walls of text).
+
+**Same-change rule (unchanged):** a change that adds or alters user-facing
+functionality MUST update documentation in the same change (same commit / PR).
+For a new capability this means: create the `docs/` article AND add a TOC entry
++ summary in README. For a changed capability: update the `docs/` article AND the
+README summary if the one-liner changed. A PR that ships user-facing behaviour
+without the matching doc delta is incomplete and MUST be blocked at review — the
+same standard as the test-first rule (Principle VIII) and the `.editorconfig`
+rule (Principle IX).
+
+**README must not duplicate docs/ content verbatim.** It summarizes and links,
+not copies. When a detail appears in both places, the `docs/` article is the
+source of truth and the README summary defers to it.
+
+**Discoverability guarantee:** a human operator MUST be able to discover, from
+the README alone, that a capability exists and where to read about it in depth.
+A capability documented only in `docs/` without a README link is undocumented.
+Conversely, a brief or trivial capability MAY live entirely in the README without
+a `docs/` article — the split is triggered by depth, not by mandate on every
+topic.
+
+- Rationale: as the webhook grew from a single admission webhook to a
+  multi-component operator with per-resource budgets, workload exclusion,
+  enforcement modes, an on-demand verification CLI, and a cross-cluster equalizer,
+  the README grew to over a thousand lines. A README of that length is no longer
+  scannable — operators cannot find what they need, and contributors hesitate to
+  add content to an already-heavy file. Making the README a navigational hub with
+  detail in `docs/` keeps each audience served: first-time operators get a short
+  quick-start, experienced operators link directly to the reference they need,
+  and contributors add new capabilities as focused articles without bloating the
+  hub.
 
 ### XI. CI-Green Completion Gate
 
@@ -377,11 +426,10 @@ the repository — building, testing, running real-infrastructure verification,
 and development workflow). A change to one surface MUST NOT silently absorb
 the other's content.
 
-- **`README.md`** — the operator's entry point. Contains: what the webhook
-  does, installation/quickstart, configuration reference (flags, env vars, CRD
-  fields), deployment instructions, admission behaviour, exposed metrics,
-  structured-log keys, and upgrade/deprecation notes. This is Principle X's
-  scope, unchanged.
+- **`README.md`** — the operator's entry point. Contains: project description,
+  quick-start, a table of contents linking to every `docs/` article, and brief
+  per-capability summaries that link to `docs/` for detail. This is Principle X's
+  scope, updated for the hub model.
 - **`CONTRIBUTING.md`** — the contributor's entry point. Contains: how to clone
   and set up the development environment, how to build (including container
   images), how to run the test suite (unit, integration, BDD, E2E), how to run
@@ -542,7 +590,8 @@ without a publish mechanism is an incomplete deliverable.
   review-blocking diff, not an editor preference.
 - **Documentation as a deliverable**: every user-facing capability (flags, env
   vars, admission behaviour, CRD spec/status fields, metrics, log keys,
-  deployment, upgrade notes) MUST be documented in `README.md` (Principle X).
+  deployment, upgrade notes) MUST be documented and discoverable from
+  `README.md`, with detailed reference in `docs/` articles (Principle X).
   Every contribution-workflow capability (build steps, test commands,
   verification tooling, development process) MUST be documented in
   `CONTRIBUTING.md` (Principle XIII). Both are first-class deliverables updated
@@ -584,4 +633,4 @@ without a publish mechanism is an incomplete deliverable.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.8.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-08-08
+**Version**: 2.9.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-08-08
