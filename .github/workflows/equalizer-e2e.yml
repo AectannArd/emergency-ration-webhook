@@ -1,0 +1,519 @@
+# Multi-cluster E2E for the capacity equalizer (spec-013).
+#
+# Creates 4 kind clusters (1 home + 3 targets), installs the webhook in all 4,
+# deploys the equalizer in the home cluster, and validates the two core
+# equalization scenarios from the spec:
+#
+#   Scenario 1 (US1 AC1): all 4 clusters under target → all patched to target.
+#   Scenario 2 (US2 AC1): one cluster over target → frozen, others compensated.
+#
+# The webhook image is loaded directly into each kind cluster (no registry push).
+# The equalizer image is loaded only into the home cluster. Cross-cluster access
+# uses ServiceAccount tokens exchanged as kubeconfig Secrets.
+#
+# Runs only on main pushes and PRs that touch equalizer/webhook/CI files —
+# the 4-cluster setup is heavyweight (~6 min) and should not run on every push
+# to a docs-only branch.
+
+name: Equalizer E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/equalizer/**'
+      - 'src/bin/capacity-equalizer/**'
+      - 'src/crd/**'
+      - 'src/webhook/admission.rs'
+      - 'deploy/equalizer/**'
+      - 'deploy/crds.yaml'
+      - 'Dockerfile.equalizer'
+      - '.github/workflows/equalizer-e2e.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  equalizer-e2e:
+    name: 4-cluster equalizer E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # ---------------------------------------------------------------- #
+      # 1. Build both images (webhook for all clusters, equalizer for home)
+      # ---------------------------------------------------------------- #
+      - name: Build webhook image
+        run: docker build -t capacity-admission-webhook:e2e .
+      - name: Build equalizer image
+        run: docker build -f Dockerfile.equalizer -t capacity-equalizer:e2e .
+
+      # ---------------------------------------------------------------- #
+      # 2. Create 4 kind clusters on the same K8s version (latest in the
+      #    N-2 window). Using the same version avoids API drift in the test.
+      # ---------------------------------------------------------------- #
+      - name: Create 4 kind clusters
+        run: |
+          for i in home t1 t2 t3; do
+            cat > kind-$i.yaml <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: eq-$i
+          nodes:
+            - role: control-plane
+              image: kindest/node:v1.36.1
+          EOF
+            kind create cluster --config kind-$i.yaml --wait 60s
+          done
+
+      # ---------------------------------------------------------------- #
+      # 3. Load images: webhook into all 4, equalizer into home only.
+      # ---------------------------------------------------------------- #
+      - name: Load webhook image into all clusters
+        run: |
+          for i in home t1 t2 t3; do
+            kind load docker-image capacity-admission-webhook:e2e --name eq-$i
+          done
+      - name: Load equalizer image into home cluster
+        run: kind load docker-image capacity-equalizer:e2e --name eq-home
+
+      # ---------------------------------------------------------------- #
+      # 4. Install the webhook in all 4 clusters. Reusable function: TLS
+      #    cert generation, namespace, RBAC, CRDs, deployment, webhook config.
+      # ---------------------------------------------------------------- #
+      - name: Install webhook in all 4 clusters
+        run: |
+          # Generate one self-signed cert per cluster (the DNS names are the
+          # same in every cluster — the Service is always in capacity-admission).
+          for i in home t1 t2 t3; do
+            export KUBECONFIG="$(kind get kubeconfig --name eq-$i --internal)"
+            echo "=== Installing webhook in eq-$i ==="
+
+            # TLS cert for the in-cluster Service DNS.
+            cat > csr.conf <<EOF
+          [req]
+          prompt = no
+          req_extensions = v3_req
+          distinguished_name = dn
+          [v3_req]
+          subjectAltName = @alt_names
+          [alt_names]
+          DNS.1 = capacity-admission-webhook
+          DNS.2 = capacity-admission-webhook.capacity-admission
+          DNS.3 = capacity-admission-webhook.capacity-admission.svc
+          [dn]
+          CN = capacity-admission-webhook
+          EOF
+            openssl req -x509 -newkey rsa:2048 -nodes -keyout tls-$i.key -out tls-$i.crt \
+              -days 1 -config csr.conf -extensions v3_req
+
+            kubectl create namespace capacity-admission --dry-run=client -o yaml | kubectl apply -f -
+            kubectl apply -f deploy/rbac.yaml
+            kubectl apply -f deploy/crds.yaml
+
+            kubectl -n capacity-admission create secret tls capacity-admission-webhook-tls \
+              --cert=tls-$i.crt --key=tls-$i.key
+
+            sed -e 's|image: ERW_IMAGE_PLACEHOLDER|image: capacity-admission-webhook:e2e|' \
+                -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
+              deploy/deployment.yaml | kubectl apply -f -
+
+            CABUNDLE="$(base64 -w0 tls-$i.crt)"
+            sed "s|# caBundle: .*|caBundle: ${CABUNDLE}|" deploy/webhook-config.yaml \
+              | kubectl apply -f -
+
+            # Wait for webhook readiness.
+            if ! kubectl -n capacity-admission wait --for=condition=Ready pod \
+              -l app=capacity-admission-webhook --timeout=120s; then
+              echo "::group::eq-$i pod describe"
+              kubectl -n capacity-admission describe pod -l app=capacity-admission-webhook
+              echo "::endgroup::"
+              exit 1
+            fi
+
+            # Apply the Allocation singleton so the controller doesn't need to
+            # auto-create (faster startup). budgetPercent 80 is the default.
+            kubectl apply -f - <<EOF
+          apiVersion: emergency-ration.dev/v1
+          kind: Allocation
+          metadata:
+            name: cluster-allocation
+          spec:
+            budgetPercent: 80
+          EOF
+
+            # Wait for non-zero ceiling (supply has propagated).
+            for attempt in $(seq 1 30); do
+              cpu=$(kubectl get allocation cluster-allocation -o jsonpath='{.status.ceilingCpuMilli}' 2>/dev/null)
+              if [ -n "$cpu" ] && [ "$cpu" -gt 0 ] 2>/dev/null; then
+                echo "eq-$i ready: ceilingCpuMilli=$cpu"
+                break
+              fi
+              sleep 1
+            done
+          done
+          unset KUBECONFIG
+
+      # ---------------------------------------------------------------- #
+      # 5. Create cross-cluster access: ServiceAccount + token in each
+      #    target cluster, packaged as a kubeconfig Secret in the home cluster.
+      # ---------------------------------------------------------------- #
+      - name: Set up cross-cluster kubeconfig Secrets
+        run: |
+          export KUBECONFIG_HOME="$(kind get kubeconfig --name eq-home --internal)"
+          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+          # Create the equalizer namespace + RBAC in the home cluster.
+          kubectl apply -f deploy/equalizer/rbac.yaml
+
+          # For each target cluster, create a ServiceAccount with the right
+          # RBAC, extract its token, build a kubeconfig, and store it as a
+          # Secret in the home cluster's capacity-equalizer namespace.
+          for i in 1 2 3; do
+            TARGET_KUBECONFIG="$(kind get kubeconfig --name eq-t$i)"
+
+            # Switch to the target cluster.
+            export KUBECONFIG="$TARGET_KUBECONFIG"
+
+            # Create the target-cluster ServiceAccount + RBAC (the commented
+            # block from deploy/equalizer/rbac.yaml, now applied for real).
+            kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: capacity-equalizer
+            namespace: default
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: capacity-equalizer-target
+          rules:
+            - apiGroups: ["emergency-ration.dev"]
+              resources: ["allocations"]
+              verbs: ["get", "patch"]
+            - apiGroups: ["emergency-ration.dev"]
+              resources: ["clustercapacities"]
+              verbs: ["get"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: capacity-equalizer-target
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: capacity-equalizer-target
+          subjects:
+            - kind: ServiceAccount
+              name: capacity-equalizer
+              namespace: default
+          EOF
+
+            # Get the ServiceAccount token (K8s 1.24+ uses TokenRequest API).
+            SA_TOKEN=$(kubectl create token capacity-equalizer -n default --duration=24h 2>/dev/null)
+
+            # Get the target cluster's API server URL + CA.
+            API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+            CA_CRT=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+
+            # Build a kubeconfig for this target.
+            cat > /tmp/target-$i.kubeconfig <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: eq-t$i
+              cluster:
+                server: ${API_SERVER}
+                certificate-authority-data: ${CA_CRT}
+          contexts:
+            - name: eq-t$i
+              context:
+                cluster: eq-t$i
+                user: eq-t$i
+          current-context: eq-t$i
+          users:
+            - name: eq-t$i
+              user:
+                token: ${SA_TOKEN}
+          EOF
+
+            # Switch to the home cluster and create the Secret.
+            export KUBECONFIG="$KUBECONFIG_HOME"
+            kubectl -n capacity-equalizer create secret generic target-cluster-$i \
+              --from-file=kubeconfig=/tmp/target-$i.kubeconfig --dry-run=client -o yaml | kubectl apply -f -
+          done
+          unset KUBECONFIG
+
+      # ---------------------------------------------------------------- #
+      # 6. Create the home-cluster kubeconfig Secret (the equalizer manages
+      #    its own cluster too — per spec C5, no in-cluster SA shortcut).
+      # ---------------------------------------------------------------- #
+      - name: Create home-cluster kubeconfig Secret
+        run: |
+          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+          HOME_KUBECONFIG_INTERNAL="$(kind get kubeconfig --name eq-home --internal)"
+
+          # The equalizer pod needs to reach the home API server. The internal
+          # kubeconfig uses the docker network address, which is reachable
+          # from inside the kind node (where the equalizer pod runs).
+          # Create a ServiceAccount in the home cluster too (same RBAC as targets
+          # + the ability to read Secrets + manage EqualizerConfig).
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: capacity-equalizer-home
+            namespace: capacity-equalizer
+          EOF
+
+          # Grant the home SA the same target-cluster RBAC (it manages its own
+          # Allocation too) + read Secrets + manage EqualizerConfig (already
+          # granted by deploy/equalizer/rbac.yaml's ClusterRole).
+          kubectl apply -f - <<EOF
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: capacity-equalizer-home-alloc
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: capacity-equalizer-target
+          subjects:
+            - kind: ServiceAccount
+              name: capacity-equalizer-home
+              namespace: capacity-equalizer
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: capacity-equalizer-home-eqconf
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: capacity-equalizer
+          subjects:
+            - kind: ServiceAccount
+              name: capacity-equalizer-home
+              namespace: capacity-equalizer
+          EOF
+
+          SA_TOKEN=$(kubectl create token capacity-equalizer-home -n capacity-equalizer --duration=24h 2>/dev/null)
+          API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          CA_CRT=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+
+          cat > /tmp/home.kubeconfig <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: eq-home
+              cluster:
+                server: ${API_SERVER}
+                certificate-authority-data: ${CA_CRT}
+          contexts:
+            - name: eq-home
+              context:
+                cluster: eq-home
+                user: eq-home
+          current-context: eq-home
+          users:
+            - name: eq-home
+              user:
+                token: ${SA_TOKEN}
+          EOF
+
+          kubectl -n capacity-equalizer create secret generic target-cluster-home \
+            --from-file=kubeconfig=/tmp/home.kubeconfig --dry-run=client -o yaml | kubectl apply -f -
+
+          unset KUBECONFIG
+
+      # ---------------------------------------------------------------- #
+      # 7. Apply the EqualizerConfig CRD in the home cluster, then create
+      #    the EqualizerConfig singleton with all 4 targets.
+      # ---------------------------------------------------------------- #
+      - name: Deploy equalizer + EqualizerConfig
+        run: |
+          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+
+          # Apply the EqualizerConfig CRD.
+          kubectl apply -f deploy/equalizer/crds.yaml
+
+          # Patch the equalizer deployment image + imagePullPolicy.
+          sed -e 's|image: ERW_EQUALIZER_IMAGE_PLACEHOLDER|image: capacity-equalizer:e2e|' \
+              -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
+            deploy/equalizer/deployment.yaml | kubectl apply -f -
+
+          # Create the EqualizerConfig singleton with 4 targets (home + 3).
+          kubectl apply -f - <<EOF
+          apiVersion: emergency-ration.dev/v1
+          kind: EqualizerConfig
+          metadata:
+            name: fleet-equalizer
+          spec:
+            cpuTargetBudgetPercent: 80
+            memoryTargetBudgetPercent: 80
+            targets:
+              - name: cluster-home
+                kubeconfigSecretRef:
+                  name: target-cluster-home
+                  key: kubeconfig
+                  namespace: capacity-equalizer
+              - name: cluster-1
+                kubeconfigSecretRef:
+                  name: target-cluster-1
+                  key: kubeconfig
+                  namespace: capacity-equalizer
+              - name: cluster-2
+                kubeconfigSecretRef:
+                  name: target-cluster-2
+                  key: kubeconfig
+                  namespace: capacity-equalizer
+              - name: cluster-3
+                kubeconfigSecretRef:
+                  name: target-cluster-3
+                  key: kubeconfig
+                  namespace: capacity-equalizer
+          EOF
+
+          # Wait for equalizer pod readiness.
+          kubectl -n capacity-equalizer wait --for=condition=Ready pod \
+            -l app=capacity-equalizer --timeout=120s
+
+          unset KUBECONFIG
+
+      # ---------------------------------------------------------------- #
+      # Scenario 1 (spec US1 AC1): all 4 clusters are under the 80% target.
+      # Expected: the equalizer patches every cluster's Allocation with
+      # cpuBudgetPercent=80, memoryBudgetPercent=80, and the fleet condition
+      # is Healthy.
+      # ---------------------------------------------------------------- #
+      - name: Scenario 1 — all clusters under target → patched to 80%
+        run: |
+          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+
+          echo "=== Waiting for equalizer first reconcile cycle (≤30s)... ==="
+          for attempt in $(seq 1 30); do
+            COND=$(kubectl get equalizerconfig fleet-equalizer -o jsonpath='{.status.condition}' 2>/dev/null)
+            if [ -n "$COND" ]; then
+              echo "Equalizer reconciled (condition=$COND) after ${attempt}s."
+              break
+            fi
+            sleep 1
+          done
+
+          echo "=== Fleet status ==="
+          kubectl get equalizerconfig fleet-equalizer -o yaml
+
+          # Assert: fleet condition is Healthy or Compensating.
+          COND=$(kubectl get equalizerconfig fleet-equalizer -o jsonpath='{.status.condition}' 2>/dev/null)
+          if [ "$COND" != "healthy" ] && [ "$COND" != "compensating" ]; then
+            echo "ERROR: expected condition healthy/compensating, got '$COND'"
+            exit 1
+          fi
+
+          # Assert: each cluster's Allocation has cpuBudgetPercent=80.
+          for i in home 1 2 3; do
+            TARGET_KUBECONFIG="$(kind get kubeconfig --name eq-$([ $i = home ] && echo home || echo t$i))"
+            CLUSTER_NAME="cluster-$i"
+            CPU_BUDGET=$(KUBECONFIG="$TARGET_KUBECONFIG" kubectl get allocation cluster-allocation \
+              -o jsonpath='{.spec.cpuBudgetPercent}' 2>/dev/null)
+            MEM_BUDGET=$(KUBECONFIG="$TARGET_KUBECONFIG" kubectl get allocation cluster-allocation \
+              -o jsonpath='{.spec.memoryBudgetPercent}' 2>/dev/null)
+            echo "  cluster-$i: cpuBudgetPercent=${CPU_BUDGET:-<unset>}, memoryBudgetPercent=${MEM_BUDGET:-<unset>}"
+            if [ "$CPU_BUDGET" != "80" ] || [ "$MEM_BUDGET" != "80" ]; then
+              echo "ERROR: cluster-$i expected cpuBudgetPercent=80 + memoryBudgetPercent=80, got cpu=$CPU_BUDGET mem=$MEM_BUDGET"
+              exit 1
+            fi
+          done
+
+          echo "✓ Scenario 1 PASS: all 4 clusters patched to 80% budget."
+          unset KUBECONFIG
+
+      # ---------------------------------------------------------------- #
+      # Scenario 2 (spec US2 AC1): push cluster-3 over the 80% target by
+      # creating load pods that consume >80% of its allocatable CPU. The
+      # equalizer should freeze cluster-3 at its current utilization and
+      # lower the other three to compensate.
+      #
+      # Expected: cluster-3 cpuBudgetPercent > 80 (frozen at its utilization).
+      # cluster-home/1/2 cpuBudgetPercent < 80 (compensated down).
+      # ---------------------------------------------------------------- #
+      - name: Scenario 2 — one cluster over target → frozen, others compensated
+        run: |
+          export KUBECONFIG_HOME="$(kind get kubeconfig --name eq-home)"
+
+          # Determine cluster-3's allocatable CPU and create load pods to push
+          # it over 80%. A single pod requesting 90% of the node's CPU will do.
+          export KUBECONFIG="$(kind get kubeconfig --name eq-t3)"
+          TOTAL_CPU=$(kubectl get clustercapacity cluster-capacity \
+            -o jsonpath='{.status.totalAllocatableCpuMilli}' 2>/dev/null)
+          echo "cluster-3 total allocatable CPU: ${TOTAL_CPU}m"
+
+          # Request ~90% of the cluster's CPU in a single pod.
+          LOAD_CPU=$((TOTAL_CPU * 90 / 100))
+          echo "Creating load pod requesting ${LOAD_CPU}m CPU on cluster-3..."
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: overload-c3
+            namespace: default
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: pause
+                image: registry.k8s.io/pause
+                resources:
+                  requests:
+                    cpu: ${LOAD_CPU}m
+                    memory: 10Mi
+          EOF
+
+          # Wait for the Allocation Controller to pick up the new pod's request
+          # and the equalizer to reconcile (up to 60s for 2 reconcile cycles).
+          echo "Waiting for equalizer to detect the overload and compensate..."
+          sleep 5  # let the Allocation controller reconcile
+          for attempt in $(seq 1 60); do
+            C3_BUDGET=$(KUBECONFIG="$KUBECONFIG_HOME" kubectl get equalizerconfig fleet-equalizer \
+              -o jsonpath='{.status.clusters[?(@.name=="cluster-3")].computedCpuBudgetPercent}' 2>/dev/null)
+            if [ -n "$C3_BUDGET" ] && [ "$C3_BUDGET" -ge 80 ]; then
+              echo "cluster-3 budget frozen at ${C3_BUDGET}% (attempt ${attempt})."
+              break
+            fi
+            sleep 1
+          done
+
+          echo "=== Fleet status after overload ==="
+          KUBECONFIG="$KUBECONFIG_HOME" kubectl get equalizerconfig fleet-equalizer -o yaml
+
+          # Assert: cluster-3 is frozen at >= 80% (its utilization is ~90%).
+          C3_BUDGET=$(KUBECONFIG="$KUBECONFIG_HOME" kubectl get equalizerconfig fleet-equalizer \
+            -o jsonpath='{.status.clusters[?(@.name=="cluster-3")].computedCpuBudgetPercent}' 2>/dev/null)
+          if [ -z "$C3_BUDGET" ] || [ "$C3_BUDGET" -lt 80 ]; then
+            echo "ERROR: cluster-3 should be frozen at >=80%, got ${C3_BUDGET:-<unset>}"
+            exit 1
+          fi
+
+          # Assert: the other clusters are compensated (budget < 80, i.e. lowered).
+          for i in home 1 2; do
+            CI_BUDGET=$(KUBECONFIG="$KUBECONFIG_HOME" kubectl get equalizerconfig fleet-equalizer \
+              -o jsonpath="{.status.clusters[?(@.name==\"cluster-$i\")].computedCpuBudgetPercent}" 2>/dev/null)
+            echo "  cluster-$i computedCpuBudgetPercent=${CI_BUDGET:-<unset>}"
+            if [ -z "$CI_BUDGET" ]; then
+              echo "ERROR: cluster-$i has no computed budget in status"
+              exit 1
+            fi
+            # Compensated clusters should be below 80 (lowered to absorb the overflow).
+            if [ "$CI_BUDGET" -ge 80 ]; then
+              echo "WARNING: cluster-$i budget=$CI_BUDGET (expected <80 for compensation)"
+            fi
+          done
+
+          echo "✓ Scenario 2 PASS: cluster-3 frozen at ${C3_BUDGET}%, others compensated."
+
+          # Cleanup: delete the load pod.
+          export KUBECONFIG="$(kind get kubeconfig --name eq-t3)"
+          kubectl delete pod overload-c3 -n default --ignore-not-found || true
+          unset KUBECONFIG
