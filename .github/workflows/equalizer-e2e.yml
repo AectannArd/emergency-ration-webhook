@@ -258,10 +258,10 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Create home-cluster kubeconfig Secret
         run: |
-          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
-          export KUBECONFIG="/tmp/kc-eq_home.yaml"
-          kind get kubeconfig --name eq-home --internal > /tmp/kc-eq_home.yaml
-          HOME_KUBECONFIG_INTERNAL="/tmp/kc-eq_home.yaml"
+          kind get kubeconfig --name eq-home > /tmp/kc-home-external.yaml
+          export KUBECONFIG="/tmp/kc-home-external.yaml"
+          kind get kubeconfig --name eq-home --internal > /tmp/kc-home-internal.yaml
+          HOME_KUBECONFIG_INTERNAL="/tmp/kc-home-internal.yaml"
 
           # The equalizer pod needs to reach the home API server. The internal
           # kubeconfig uses the docker network address, which is reachable
