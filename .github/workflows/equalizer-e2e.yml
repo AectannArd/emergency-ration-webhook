@@ -176,6 +176,7 @@ jobs:
           # RBAC, extract its token, build a kubeconfig, and store it as a
           # Secret in the home cluster's capacity-equalizer namespace.
           for i in 1 2 3; do
+            # Non-internal kubeconfig for CI-runner kubectl ops (SA creation).
             kind get kubeconfig --name eq-t$i > /tmp/kc-eq_t$i.yaml
             TARGET_KUBECONFIG="/tmp/kc-eq_t$i.yaml"
 
@@ -220,9 +221,13 @@ jobs:
             # Get the ServiceAccount token (K8s 1.24+ uses TokenRequest API).
             SA_TOKEN=$(kubectl create token capacity-equalizer -n default --duration=24h 2>/dev/null)
 
-            # Get the target cluster's API server URL + CA.
-            API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-            CA_CRT=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+            # Get the target cluster's API server URL + CA from the INTERNAL
+            # kubeconfig — the equalizer pod runs inside the kind docker network
+            # and can only reach the internal hostname (eq-t$i-control-plane:6443),
+            # not the CI runner's localhost port mapping.
+            kind get kubeconfig --name eq-t$i --internal > /tmp/kc-eq_t${i}_internal.yaml
+            API_SERVER=$(KUBECONFIG="/tmp/kc-eq_t${i}_internal.yaml" kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+            CA_CRT=$(KUBECONFIG="/tmp/kc-eq_t${i}_internal.yaml" kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
 
             # Build a kubeconfig for this target.
             cat > /tmp/target-$i.kubeconfig <<EOF
@@ -308,8 +313,10 @@ jobs:
           EOF
 
           SA_TOKEN=$(kubectl create token capacity-equalizer-home -n capacity-equalizer --duration=24h 2>/dev/null)
-          API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-          CA_CRT=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+          # Use the INTERNAL kubeconfig for the API server URL — the equalizer
+          # pod runs inside kind and needs the docker-network address.
+          API_SERVER=$(KUBECONFIG="/tmp/kc-home-internal.yaml" kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          CA_CRT=$(KUBECONFIG="/tmp/kc-home-internal.yaml" kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
 
           cat > /tmp/home.kubeconfig <<EOF
           apiVersion: v1
