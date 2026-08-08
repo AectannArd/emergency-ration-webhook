@@ -89,7 +89,7 @@ jobs:
           # Generate one self-signed cert per cluster (the DNS names are the
           # same in every cluster — the Service is always in capacity-admission).
           for i in home t1 t2 t3; do
-            kind get kubeconfig --name eq-$i --internal > /tmp/kc-eq_$i.yaml
+            kind get kubeconfig --name eq-$i > /tmp/kc-eq_$i.yaml
             export KUBECONFIG="/tmp/kc-eq_$i.yaml"
             echo "=== Installing webhook in eq-$i ==="
 
@@ -164,7 +164,7 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Set up cross-cluster kubeconfig Secrets
         run: |
-          kind get kubeconfig --name eq-home --internal > /tmp/kc-eq_home.yaml
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
           export KUBECONFIG_HOME="/tmp/kc-eq_home.yaml"
           kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
           export KUBECONFIG="/tmp/kc-eq_home.yaml"
