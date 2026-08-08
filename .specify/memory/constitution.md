@@ -1,6 +1,7 @@
 <!--
 === Sync Impact Report ===
-Version change: 2.8.0 → 2.9.0 (MINOR — Principle X redefined: README as Documentation Hub with docs/ Articles)
+Version change: 2.9.0 → 2.10.0 (MINOR — Principle XVI added: Manifest Bundle Release Artifacts)
+  Prior: 2.8.0 → 2.9.0 (MINOR — Principle X redefined: README as Documentation Hub with docs/ Articles)
   Prior: 2.7.0 → 2.8.0 (MINOR — Principle XV added: Build and Publish Procedure for Every Docker Artifact)
   Prior: 2.6.0 → 2.7.0 (MINOR — Principle XIV added: Artifact Inventory)
   Prior: 2.5.0 → 2.6.0 (MINOR — Principle XIII added: Separation of Usage and Contribution Documentation)
@@ -37,6 +38,7 @@ Added principles:
   - v2.6.0: XIII — Separation of Usage and Contribution Documentation
   - v2.7.0: XIV — Artifact Inventory
   - v2.8.0: XV — Build and Publish Procedure for Every Docker Artifact
+  - v2.10.0: XVI — Manifest Bundle Release Artifacts
 Modified in v1.3.0:
   - Principle VI: integration test framework selection locked.
   - Technology Constraints: added Primary Dependencies, Testing, SLO targets,
@@ -77,6 +79,7 @@ Modified in v2.4.0:
 Added sections (cumulative):
   - Core Principles I–XIV
   - Core Principles I–XV
+  - Core Principles I–XVI
   - Technology Constraints
   - Development Workflow
   - Governance
@@ -523,6 +526,49 @@ without a publish mechanism is an incomplete deliverable.
   publish procedure to land with the Dockerfile eliminates this class of gap:
   if the image is declared, the procedure to build and ship it is declared too.
 
+### XVI. Manifest Bundle Release Artifacts
+
+Every containerised artifact in `ARTIFACTS.md` MUST ship two versioned manifest
+bundles — a Kustomize bundle and a Helm chart — as release artifacts. A Docker
+image without matching templated manifests is an incomplete deliverable.
+
+- **Scope**: this principle applies to every artifact whose "Docker image"
+  column in `ARTIFACTS.md` is "Yes". Artifacts marked "No" (e.g. CLI tools) are
+  out of scope.
+- **Required elements**: for each containerised artifact, the repository MUST
+  define:
+  1. **Kustomize bundle**: a `kustomization.yaml` + resource manifests under
+     `deploy/kustomize/<component>/`, renderable via `kustomize build` and
+     deployable via `kubectl kustomize | kubectl apply`. Image override via the
+     `images:` directive.
+  2. **Helm chart**: a `Chart.yaml` + `values.yaml` + `templates/` under
+     `deploy/charts/<component>/`, installable via `helm install`. The chart
+     passes `helm lint` and is packaged as a versioned `.tgz` attached to the
+     GitHub Release.
+  3. **Parity**: the Kustomize and Helm rendered output MUST be field-equivalent
+     on all contract-critical fields (admission failurePolicy, RBAC verbs,
+     container securityContext, ports, probes, namespaces, resource names).
+- **Same-change rule**: adding a containerised binary or a new deployment
+  manifest MUST land with both manifest bundles in the same change (same
+  commit / PR). A Dockerfile with no Kustomize/Helm bundle is incomplete and
+  MUST be blocked at review — the same standard as the artifact inventory rule
+  (Principle XIV) and the publish procedure rule (Principle XV).
+- **No raw manifest drift**: the Kustomize bundle is the single manifest source
+  of truth. Raw (non-templated) manifest files at the repository root are a
+  defect — they inevitably drift from the templated bundles. The bundles
+  replace, not supplement, raw manifests.
+- **`ARTIFACTS.md` disclosure**: the manifest bundle section of `ARTIFACTS.md`
+  MUST record the Kustomize path, Helm chart name, and release-artifact format
+  for each containerised artifact, alongside the Docker image row.
+- **Rationale**: when the project grew from one Docker image to two
+  (webhook + equalizer), operators had no templated installation path — they had
+  to hand-edit raw YAML and `sed` image placeholders. This is fragile,
+  error-prone, and scales poorly across environments. Mandating Kustomize +
+  Helm bundles as first-class release artifacts (with the same same-change
+  obligation as the Docker image publish) ensures every containerised artifact
+  ships with a reproducible, parameterized deployment path. The cross-format
+  parity requirement prevents the two bundles from silently drifting apart.
+
 ## Technology Constraints
 
 - **Language**: Rust (current stable edition; MSRV recorded in `Cargo.toml`).
@@ -619,6 +665,10 @@ without a publish mechanism is an incomplete deliverable.
   git-ignored `.temp/` directory (Principle XII), never to the repository root
   or any tracked directory. If an artifact must persist beyond the task, promote
   it to a tracked location (specs, README, source) with an explicit rationale.
+- **Manifest bundles**: every containerised artifact ships Kustomize + Helm
+  bundles as release artifacts (Principle XVI). The Kustomize bundle is the
+  single manifest source of truth; raw manifest files are not maintained
+  alongside the bundles.
 
 ## Governance
 
@@ -633,4 +683,4 @@ without a publish mechanism is an incomplete deliverable.
 - Use `.specify/memory/constitution.md` as the single source of truth for these
   principles; if a doc disagrees, the constitution wins.
 
-**Version**: 2.9.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-08-08
+**Version**: 2.10.0 | **Ratified**: 2026-07-25 | **Last Amended**: 2026-08-08

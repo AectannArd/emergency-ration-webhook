@@ -176,6 +176,9 @@ instructions, testing, and project structure, see
 
 - **[Deployment Guide](./docs/deployment.md)** — building the image, the 6-step
   deploy sequence, and TLS provisioning (cert-manager or manual Secret).
+- **[Manifest Bundles](./docs/manifest-bundles.md)** — installation via
+  Kustomize and Helm: image overrides, values reference, and chart package
+  download.
 
 ### Configuration
 
