@@ -89,7 +89,8 @@ jobs:
           # Generate one self-signed cert per cluster (the DNS names are the
           # same in every cluster — the Service is always in capacity-admission).
           for i in home t1 t2 t3; do
-            export KUBECONFIG="$(kind get kubeconfig --name eq-$i --internal)"
+            kind get kubeconfig --name eq-$i --internal > /tmp/kc-eq_$i.yaml
+            export KUBECONFIG="/tmp/kc-eq_$i.yaml"
             echo "=== Installing webhook in eq-$i ==="
 
             # TLS cert for the in-cluster Service DNS.
@@ -163,8 +164,10 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Set up cross-cluster kubeconfig Secrets
         run: |
-          export KUBECONFIG_HOME="$(kind get kubeconfig --name eq-home --internal)"
-          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+          kind get kubeconfig --name eq-home --internal > /tmp/kc-eq_home.yaml
+          export KUBECONFIG_HOME="/tmp/kc-eq_home.yaml"
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
+          export KUBECONFIG="/tmp/kc-eq_home.yaml"
           # Create the equalizer namespace + RBAC in the home cluster.
           kubectl apply -f deploy/equalizer/rbac.yaml
 
@@ -172,7 +175,8 @@ jobs:
           # RBAC, extract its token, build a kubeconfig, and store it as a
           # Secret in the home cluster's capacity-equalizer namespace.
           for i in 1 2 3; do
-            TARGET_KUBECONFIG="$(kind get kubeconfig --name eq-t$i)"
+            kind get kubeconfig --name eq-t$i > /tmp/kc-eq_t$i.yaml
+            TARGET_KUBECONFIG="/tmp/kc-eq_t$i.yaml"
 
             # Switch to the target cluster.
             export KUBECONFIG="$TARGET_KUBECONFIG"
@@ -253,8 +257,10 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Create home-cluster kubeconfig Secret
         run: |
-          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
-          HOME_KUBECONFIG_INTERNAL="$(kind get kubeconfig --name eq-home --internal)"
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
+          export KUBECONFIG="/tmp/kc-eq_home.yaml"
+          kind get kubeconfig --name eq-home --internal > /tmp/kc-eq_home.yaml
+          HOME_KUBECONFIG_INTERNAL="/tmp/kc-eq_home.yaml"
 
           # The equalizer pod needs to reach the home API server. The internal
           # kubeconfig uses the docker network address, which is reachable
@@ -335,7 +341,8 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Deploy equalizer + EqualizerConfig
         run: |
-          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
+          export KUBECONFIG="/tmp/kc-eq_home.yaml"
 
           # Apply the EqualizerConfig CRD.
           kubectl apply -f deploy/equalizer/crds.yaml
@@ -391,7 +398,8 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Scenario 1 — all clusters under target → patched to 80%
         run: |
-          export KUBECONFIG="$(kind get kubeconfig --name eq-home)"
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
+          export KUBECONFIG="/tmp/kc-eq_home.yaml"
 
           echo "=== Waiting for equalizer first reconcile cycle (≤30s)... ==="
           for attempt in $(seq 1 30); do
@@ -415,11 +423,12 @@ jobs:
 
           # Assert: each cluster's Allocation has cpuBudgetPercent=80.
           for i in home 1 2 3; do
-            TARGET_KUBECONFIG="$(kind get kubeconfig --name eq-$([ $i = home ] && echo home || echo t$i))"
+            CLUSTER_SUFFIX=$([ $i = home ] && echo home || echo t$i)
+            kind get kubeconfig --name eq-$CLUSTER_SUFFIX > /tmp/kc-check-$i.yaml
             CLUSTER_NAME="cluster-$i"
-            CPU_BUDGET=$(KUBECONFIG="$TARGET_KUBECONFIG" kubectl get allocation cluster-allocation \
+            CPU_BUDGET=$(KUBECONFIG="/tmp/kc-check-$i.yaml" kubectl get allocation cluster-allocation \
               -o jsonpath='{.spec.cpuBudgetPercent}' 2>/dev/null)
-            MEM_BUDGET=$(KUBECONFIG="$TARGET_KUBECONFIG" kubectl get allocation cluster-allocation \
+            MEM_BUDGET=$(KUBECONFIG="/tmp/kc-check-$i.yaml" kubectl get allocation cluster-allocation \
               -o jsonpath='{.spec.memoryBudgetPercent}' 2>/dev/null)
             echo "  cluster-$i: cpuBudgetPercent=${CPU_BUDGET:-<unset>}, memoryBudgetPercent=${MEM_BUDGET:-<unset>}"
             if [ "$CPU_BUDGET" != "80" ] || [ "$MEM_BUDGET" != "80" ]; then
@@ -442,11 +451,13 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Scenario 2 — one cluster over target → frozen, others compensated
         run: |
-          export KUBECONFIG_HOME="$(kind get kubeconfig --name eq-home)"
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
+          export KUBECONFIG_HOME="/tmp/kc-eq_home.yaml"
 
           # Determine cluster-3's allocatable CPU and create load pods to push
           # it over 80%. A single pod requesting 90% of the node's CPU will do.
-          export KUBECONFIG="$(kind get kubeconfig --name eq-t3)"
+          kind get kubeconfig --name eq-t3 > /tmp/kc-eq_t3.yaml
+          export KUBECONFIG="/tmp/kc-eq_t3.yaml"
           TOTAL_CPU=$(kubectl get clustercapacity cluster-capacity \
             -o jsonpath='{.status.totalAllocatableCpuMilli}' 2>/dev/null)
           echo "cluster-3 total allocatable CPU: ${TOTAL_CPU}m"
@@ -514,7 +525,8 @@ jobs:
           echo "✓ Scenario 2 PASS: cluster-3 frozen at ${C3_BUDGET}%, others compensated."
 
           # Cleanup: delete the load pod.
-          export KUBECONFIG="$(kind get kubeconfig --name eq-t3)"
+          kind get kubeconfig --name eq-t3 > /tmp/kc-eq_t3.yaml
+          export KUBECONFIG="/tmp/kc-eq_t3.yaml"
           kubectl delete pod overload-c3 -n default --ignore-not-found || true
           unset KUBECONFIG
 
@@ -536,14 +548,16 @@ jobs:
       # ---------------------------------------------------------------- #
       - name: Scenario 3 — cluster loses capacity → fleet recalculates
         run: |
-          export KUBECONFIG_HOME="$(kind get kubeconfig --name eq-home)"
+          kind get kubeconfig --name eq-home > /tmp/kc-eq_home.yaml
+          export KUBECONFIG_HOME="/tmp/kc-eq_home.yaml"
 
           # Record the fleet state before the capacity change.
           echo "=== Fleet status BEFORE capacity change ==="
           KUBECONFIG="$KUBECONFIG_HOME" kubectl get equalizerconfig fleet-equalizer -o yaml
 
           # Cordon cluster-2's node (mark unschedulable → excluded from capacity).
-          export KUBECONFIG="$(kind get kubeconfig --name eq-t2)"
+          kind get kubeconfig --name eq-t2 > /tmp/kc-eq_t2.yaml
+          export KUBECONFIG="/tmp/kc-eq_t2.yaml"
           NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
           echo "Cordoning node $NODE on cluster-2 (eq-t2)..."
           kubectl cordon "$NODE"
