@@ -70,51 +70,44 @@ docker pull aectann/emergency-ration-webhook:v1.0.0   # a specific release
 docker pull aectann/emergency-ration-webhook:latest   # the latest stable release
 ```
 
-Replace the `ERW_IMAGE_PLACEHOLDER` token in the `image:` field of
-[`deploy/deployment.yaml`](./deploy/deployment.yaml) with the reference above. For
-the full tag conventions (`vX.Y.Z`, pre-releases, `latest` tracking), see the
+The webhook Kustomize bundle defaults to `aectann/emergency-ration-webhook:latest`;
+override it with the reference above when applying (see
+[Deploy to Kubernetes](#deploy-to-kubernetes)). For the full tag conventions
+(`vX.Y.Z`, pre-releases, `latest` tracking), see the
 [Deployment Guide](./docs/deployment.md#published-image); to build from source
 instead, see [Build the Image](./docs/deployment.md#build-the-image).
 
 ### Deploy to Kubernetes
 
-Apply the manifests in [`deploy/`](./deploy/). The order below ensures the
-`capacity-admission` namespace exists before the namespaced resources, and that
-the webhook's own pods are not gated by their own webhook (the
-[bootstrap exclusion](./docs/failure-modes.md#webhook-self-admission-bootstrap)).
+Apply the webhook Kustomize bundle in
+[`deploy/kustomize/webhook/`](./deploy/kustomize/webhook/) — the manifest source of
+truth. It bundles the `capacity-admission` namespace, CRDs, RBAC, Deployment,
+Service, and ValidatingWebhookConfiguration in dependency order, so the namespace
+exists before the namespaced resources and the webhook's own pods are not gated by
+their own webhook (the
+[bootstrap exclusion](./docs/failure-modes.md#webhook-self-admission-bootstrap)):
 
-1. **CRDs** — register the `ClusterCapacity` and `Allocation` custom resources:
+```sh
+kubectl kustomize deploy/kustomize/webhook | kubectl apply -f -
+```
 
-   ```sh
-   kubectl apply -f deploy/crds.yaml
-   ```
+The bundle defaults to the published image (`aectann/emergency-ration-webhook:latest`).
+To pin a specific tag or use your own image, override it on the rendered output:
 
-2. **Namespace + Deployment + Service** — creates namespace `capacity-admission`,
-   a 2-replica `Deployment`, and the `Service` exposing the webhook:
+```sh
+kubectl kustomize deploy/kustomize/webhook \
+  | sed 's|aectann/emergency-ration-webhook:latest|aectann/emergency-ration-webhook:v1.0.0|' \
+  | kubectl apply -f -
+```
 
-   ```sh
-   kubectl apply -f deploy/deployment.yaml
-   ```
+**TLS certificate** — provision the serving certificate the webhook mounts at
+`/tls`. With [cert-manager](https://cert-manager.io/) installed, the bundle's
+`cert-setup.yaml` issues it automatically and injects the `caBundle`. Without
+cert-manager, use the manual Secret path in
+[TLS Provisioning](./docs/deployment.md#tls-provisioning).
 
-3. **RBAC** — `ServiceAccount`, least-privilege `ClusterRole` (read on nodes and
-   pods; read/write on the two CRDs' `/status`), and the binding:
-
-   ```sh
-   kubectl apply -f deploy/rbac.yaml
-   ```
-
-4. **TLS certificate** — provision the serving certificate the webhook mounts at
-   `/tls`. See [TLS Provisioning](./docs/deployment.md#tls-provisioning)
-   (cert-manager is the default; a manual Secret is the fallback).
-
-5. **ValidatingWebhookConfiguration** — registers the webhook with the API server:
-
-   ```sh
-   kubectl apply -f deploy/webhook-config.yaml
-   ```
-
-6. **Singletons & budget** — you're done. On startup the controllers auto-create
-   both singleton instances; **neither needs to be created manually**:
+**Singletons & budget** — you're done. On startup the controllers auto-create
+both singleton instances; **neither needs to be created manually**:
 
    - `cluster-capacity` (`ClusterCapacity`, empty spec) — the supply side.
    - `cluster-allocation` (`Allocation`, `spec.budgetPercent: 80`) — the demand
@@ -183,6 +176,9 @@ instructions, testing, and project structure, see
 
 - **[Deployment Guide](./docs/deployment.md)** — building the image, the 6-step
   deploy sequence, and TLS provisioning (cert-manager or manual Secret).
+- **[Manifest Bundles](./docs/manifest-bundles.md)** — installation via
+  Kustomize and Helm: image overrides, values reference, and chart package
+  download.
 
 ### Configuration
 

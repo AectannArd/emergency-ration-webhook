@@ -33,17 +33,17 @@ When the over-cluster drops to 86%, budgets recalculate to 77%/77%/86%.
 
 ```bash
 # 1. Apply the EqualizerConfig CRD + RBAC + Deployment in the home cluster.
-kubectl apply -f deploy/equalizer/
+kubectl kustomize deploy/kustomize/equalizer | kubectl apply -f -
 
 # 2. Create a kubeconfig Secret for each target cluster (including the home cluster).
 kubectl create secret generic cluster-a-kubeconfig \
   --from-file=kubeconfig=/path/to/cluster-a.kubeconfig -n default
 
-# 3. Create the EqualizerConfig singleton.
-kubectl apply -f deploy/equalizer/equalizer-config.example.yaml
+# 3. Create the EqualizerConfig singleton (edit the kubeconfig placeholders first).
+kubectl apply -f deploy/kustomize/equalizer/example-config.yaml
 ```
 
-See `deploy/equalizer/equalizer-config.example.yaml` for a full example with
+See `deploy/kustomize/equalizer/example-config.yaml` for a full example with
 target cluster definitions and Secret references.
 
 ## EqualizerConfig CRD reference

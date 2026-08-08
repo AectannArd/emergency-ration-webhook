@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.89"
 description = "Kubernetes validating admission webhook that enforces a cluster capacity budget."
 license = "Apache-2.0"
+# spec-015: erw-verify embeds the Kustomize-rendered webhook manifests at
+# compile time. The build script runs `kustomize`/`kubectl kustomize` over
+# deploy/kustomize/webhook; it executes for the whole package, so `kustomize`
+# (or `kubectl`) must be on PATH at build time (CONTRIBUTING.md).
+build = "src/bin/erw-verify/build.rs"
 
 [[bin]]
 name = "capacity-admission-webhook"

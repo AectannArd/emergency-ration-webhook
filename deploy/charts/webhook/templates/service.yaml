@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "webhook.name" . }}
+  namespace: {{ template "webhook.namespace" . }}
+spec:
+  selector:
+    app: {{ template "webhook.name" . }}
+  ports:
+    # Admission endpoint referenced by the ValidatingWebhookConfiguration.
+    - name: webhook
+      port: 8443
+      targetPort: webhook
+    # Plaintext scrape/probe port.
+    - name: metrics
+      port: 9090
+      targetPort: metrics

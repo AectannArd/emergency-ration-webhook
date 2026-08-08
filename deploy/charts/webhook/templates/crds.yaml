@@ -1,0 +1,230 @@
+# ClusterCapacity + Allocation CustomResourceDefinition manifests (T022).
+#
+# Group/apiVersion: emergency-ration.dev/v1. Both are cluster-scoped singletons
+# (ClusterCapacity "cluster-capacity", Allocation "cluster-allocation") whose
+# `.status` is written by the controllers and read by the admission webhook. The
+# schemas match data-model.md §1–2 and the derive-generated OpenAPI in
+# `ClusterCapacity::crd()` / `Allocation::crd()`.
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clustercapacities.emergency-ration.dev
+spec:
+  group: emergency-ration.dev
+  names:
+    kind: ClusterCapacity
+    plural: clustercapacities
+    singular: clustercapacity
+    shortNames: ["cc"]
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                nodeSelectors:
+                  type: array
+                  description: >
+                    Optional list of label selectors for excluding nodes from
+                    the capacity aggregate. A node matching ANY selector is
+                    excluded (OR semantics). Each selector uses standard
+                    Kubernetes LabelSelector semantics (matchLabels +
+                    matchExpressions). When absent or empty, only unschedulable
+                    nodes (spec.unschedulable = true) are excluded.
+                  items:
+                    type: object
+                    properties:
+                      matchLabels:
+                        type: object
+                        additionalProperties:
+                          type: string
+                      matchExpressions:
+                        type: array
+                        items:
+                          type: object
+                          required: ["key", "operator"]
+                          properties:
+                            key:
+                              type: string
+                            operator:
+                              type: string
+                            values:
+                              type: array
+                              items:
+                                type: string
+            status:
+              type: object
+              properties:
+                totalAllocatableCpuMilli:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                totalAllocatableMemoryBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                nodeCount:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                lastUpdated:
+                  type: string
+                  description: Timestamp of the last capacity recomputation (RFC 3339).
+                excludedNodeCount:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  description: >
+                    Total nodes excluded from the aggregate
+                    (excludedByUnschedulable + excludedBySelector).
+                excludedByUnschedulable:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  description: Nodes excluded because spec.unschedulable = true.
+                excludedBySelector:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  description: Nodes excluded because they matched spec.nodeSelectors.
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: allocations.emergency-ration.dev
+spec:
+  group: emergency-ration.dev
+  names:
+    kind: Allocation
+    plural: allocations
+    singular: allocation
+    shortNames: ["alloc"]
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["budgetPercent"]
+              properties:
+                budgetPercent:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 100
+                  description: >
+                    Maximum allowed allocation as a percentage of total
+                    allocatable capacity (0–100). Applied to both CPU and RAM
+                    independently. 0 rejects all requests; 100 only rejects
+                    genuine overcommit beyond physical capacity.
+                enforcementMode:
+                  type: string
+                  nullable: true
+                  enum: ["enforce", "dry-run"]
+                  description: >
+                    Enforcement mode. When 'dry-run', over-budget pods are
+                    admitted with a warning instead of rejected; fail-closed paths
+                    (stale/missing capacity data, malformed request, timeout,
+                    panic) still reject in both modes. Defaults to 'enforce' when
+                    absent.
+                excludedNamespaces:
+                  type: array
+                  nullable: true
+                  description: >
+                    Optional list of namespace names whose pods are exempt from
+                    capacity admission (spec-008). A pod whose namespace matches
+                    ANY entry is admitted without a budget check (OR semantics
+                    with excludedPriorityClasses). Excluded pods are still counted
+                    in allocation accounting.
+                  items:
+                    type: string
+                excludedPriorityClasses:
+                  type: array
+                  nullable: true
+                  description: >
+                    Optional list of priority class names whose pods are exempt
+                    from capacity admission (spec-008). Matched against
+                    pod.spec.priorityClassName as a string match (no PriorityClass
+                    resource resolution). When both lists are set, a pod matching
+                    either is exempt.
+                  items:
+                    type: string
+                cpuBudgetPercent:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 100
+                  nullable: true
+                  description: >
+                    Optional CPU budget override (0–100) (spec-012). When present,
+                    the CPU ceiling is derived from this value instead of
+                    budgetPercent; when absent, CPU falls back to budgetPercent.
+                memoryBudgetPercent:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 100
+                  nullable: true
+                  description: >
+                    Optional memory budget override (0–100) (spec-012). Symmetric
+                    to cpuBudgetPercent for RAM: when present, the memory ceiling
+                    is derived from this value instead of budgetPercent.
+            status:
+              type: object
+              properties:
+                allocatedCpuMilli:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                allocatedMemoryBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                ceilingCpuMilli:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                ceilingMemoryBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                utilizationPercentCpu:
+                  type: number
+                  format: double
+                utilizationPercentMemory:
+                  type: number
+                  format: double
+                lastUpdated:
+                  type: string
+                  description: Timestamp of the last allocation recomputation (RFC 3339).
+                effectiveCpuBudgetPercent:
+                  type: integer
+                  format: int32
+                  description: >
+                    Effective CPU budget percent the controller used to compute
+                    ceilingCpuMilli (spec-012): cpuBudgetPercent if set, else
+                    budgetPercent. Exposed for observability.
+                effectiveMemoryBudgetPercent:
+                  type: integer
+                  format: int32
+                  description: >
+                    Effective memory budget percent (spec-012): memoryBudgetPercent
+                    if set, else budgetPercent. Symmetric to effectiveCpuBudgetPercent.

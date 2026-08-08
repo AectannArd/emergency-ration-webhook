@@ -13,6 +13,21 @@ file MUST be updated in the same change (Constitution Principle XIV).
 | `capacity-equalizer` | `src/bin/capacity-equalizer/main.rs` | Yes | `Dockerfile.equalizer` | `aectann/emergency-ration-equalizer` |
 | `erw-verify` | `src/bin/erw-verify/main.rs` | No | — | — |
 
+## Manifest bundles
+
+Every containerised artifact ships two templated manifest formats as release
+artifacts (Constitution Principle XVI). The Kustomize bundle is the single
+manifest source of truth; the Helm chart is a parameterized packaging of the
+same resources.
+
+| Component | Kustomize bundle | Helm chart | Release artifact |
+|-----------|-----------------|------------|-----------------|
+| Webhook | [`deploy/kustomize/webhook/`](../deploy/kustomize/webhook/) | `emergency-ration-webhook` | `.tgz` attached to GitHub Release |
+| Equalizer | [`deploy/kustomize/equalizer/`](../deploy/kustomize/equalizer/) | `emergency-ration-equalizer` | `.tgz` attached to GitHub Release |
+
+Installation instructions for both formats are in
+[docs/manifest-bundles.md](../docs/manifest-bundles.md).
+
 ## Detail
 
 ### capacity-admission-webhook — the admission webhook
@@ -25,7 +40,7 @@ over HTTPS on port 8443, with plaintext metrics/probe on port 9090.
 - **Dockerfile**: [`Dockerfile`](../Dockerfile) (multi-stage, distroless runtime)
 - **Publishing**: tag-triggered multi-arch build (amd64 + arm64) via
   [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)
-- **Deployment manifest**: [`deploy/deployment.yaml`](../deploy/deployment.yaml)
+- **Deployment manifest**: [`deploy/kustomize/webhook/deployment.yaml`](../deploy/kustomize/webhook/deployment.yaml)
 
 ### capacity-equalizer — multi-cluster capacity equalizer
 
@@ -39,7 +54,7 @@ fleet of clusters by adjusting per-resource budget percentages.
 - **Publishing**: tag-triggered multi-arch build (amd64 + arm64) via
   [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) (matrix
   entry `capacity-equalizer`)
-- **Deployment manifest**: [`deploy/equalizer/deployment.yaml`](../deploy/equalizer/deployment.yaml)
+- **Deployment manifest**: [`deploy/kustomize/equalizer/deployment.yaml`](../deploy/kustomize/equalizer/deployment.yaml)
 
 ### erw-verify — on-demand infrastructure verification tool
 

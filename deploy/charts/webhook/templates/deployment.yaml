@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "webhook.name" . }}
+  namespace: {{ template "webhook.namespace" . }}
+  labels:
+    {{- include "webhook.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "webhook.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "webhook.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ template "webhook.name" . }}
+      # The webhook's own pods land in an excluded namespace (webhook-config.yaml
+      # namespaceSelector), avoiding the bootstrap self-admission problem.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webhook
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --port=8443
+            - --metrics-port=9090
+            - --tls-cert-file=/tls/tls.crt
+            - --tls-key-file=/tls/tls.key
+            - --decision-timeout-ms=100
+            - --capacity-freshness-timeout-secs=30
+          ports:
+            - name: webhook
+              containerPort: 8443
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: RUST_LOG
+              value: debug
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # kubelet probes reach the plaintext HTTP /healthz on the metrics port.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tls
+          secret:
+            # Created by cert-setup.yaml (cert-manager) or provided manually.
+            secretName: capacity-admission-webhook-tls

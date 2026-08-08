@@ -31,14 +31,14 @@ const NAMESPACE: &str = "capacity-admission";
 /// Label selector matching every webhook pod (the Deployment's replica set).
 const APP_LABEL: &str = "app=capacity-admission-webhook";
 /// Name of the webhook `Service` whose `Endpoints` gate restore readiness
-/// (spec-010). Matches the Service name in `deploy/deployment.yaml`. After S9
+/// (spec-010). Matches the Service name in the webhook Kustomize bundle. After S9
 /// kills the pods the Endpoints controller has a propagation delay; restore must
 /// wait for ≥1 ready address so the apiserver can forward S10's probe instead of
 /// failing closed with "no endpoints available" (S9's failure mode).
 const SERVICE_NAME: &str = "capacity-admission-webhook";
 /// Freshness threshold the webhook enforces. Matches the
-/// `--capacity-freshness-timeout-secs=30` arg in `deploy/deployment.yaml`, which
-/// is the manifest the verify tool applies — so within a run this is exact.
+/// `--capacity-freshness-timeout-secs=30` arg in the webhook Kustomize bundle,
+/// which is the manifest the verify tool applies — so within a run this is exact.
 const FRESHNESS_THRESHOLD_SECS: i64 = 30;
 /// How far S11 backdates `Allocation.status.lastUpdated` (well beyond the
 /// threshold → unambiguously stale).

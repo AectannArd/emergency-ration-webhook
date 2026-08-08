@@ -1,0 +1,37 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: capacity-admission.emergency-ration.dev
+  labels:
+    app: {{ template "webhook.name" . }}
+  # cert-manager injects the CA bundle into the webhook clientConfig.caBundle.
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Values.namespace }}/{{ template "webhook.name" . }}
+webhooks:
+  - name: capacity-admission.emergency-ration.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail # Principle I: fail-closed.
+    matchPolicy: Exact
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ template "webhook.name" . }}
+        namespace: {{ .Values.namespace }}
+        path: "/validate"
+        port: 8443
+      # caBundle: <base64-encoded CA cert, injected by cert-manager or manual>
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        operations: ["CREATE", "UPDATE"]
+        scope: "*"
+    namespaceSelector:
+      matchExpressions:
+        # Defence-in-depth only: the apiserver filters the webhook's OWN namespace
+        # so the webhook can never self-gate (FR-009).
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - {{ .Values.namespace }}

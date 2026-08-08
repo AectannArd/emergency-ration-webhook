@@ -1,0 +1,30 @@
+# Container image (override to point at a different registry/tag).
+image:
+  repository: aectann/emergency-ration-webhook
+  tag: latest
+  pullPolicy: Always
+
+# Namespace for all namespaced resources (CRDs + ClusterRole are cluster-scoped).
+namespace: capacity-admission
+
+# Webhook deployment.
+replicas: 2
+
+# Default budget percent for the auto-created Allocation singleton. Documented
+# here as the operator reference value; the singleton itself is created at
+# runtime by the controller (not a chart resource).
+budget:
+  defaultPercent: 80
+
+# Container resources (matches deploy/kustomize/webhook/deployment.yaml defaults).
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# TLS — cert-manager is the default; set to false for manual Secret.
+certManager:
+  enabled: true

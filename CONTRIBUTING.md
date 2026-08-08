@@ -43,12 +43,19 @@ docker build -t capacity-admission-webhook:latest .
 ```
 
 Push the image to a registry your cluster can reach (or load it locally for a
-`kind`/`k3d` cluster), then update the `image:` field in
-[`deploy/deployment.yaml`](./deploy/deployment.yaml) to point at it.
+`kind`/`k3d` cluster), then override the bundle default image when applying the
+webhook Kustomize bundle (see [Deployment](./docs/deployment.md#deploy-to-kubernetes)):
 
-> **Air-gapped / offline clusters**: `deploy/deployment.yaml` sets
-> `imagePullPolicy: IfNotPresent`, so the image must already be present in the
-> cluster (in a registry or loaded locally) before the Deployment goes healthy.
+```sh
+kubectl kustomize deploy/kustomize/webhook \
+  | sed 's|aectann/emergency-ration-webhook:latest|<your-image-reference>|' \
+  | kubectl apply -f -
+```
+
+> **Air-gapped / offline clusters**: the bundle sets `imagePullPolicy: Always`
+> (the image comes from a remote registry). For a cluster where you load the image
+> locally (`kind`/`k3d`), relax it to `IfNotPresent` in the same sed pass so the
+> kubelet does not try to re-pull from a registry it cannot reach.
 
 For a `kind` cluster (used in CI), load the image locally:
 
@@ -63,14 +70,18 @@ kind load docker-image capacity-admission-webhook:latest --name <your-cluster>
 cargo build --bin erw-verify --release   # binary at target/release/erw-verify
 ```
 
-The binary embeds the `deploy/*.yaml` manifests at compile time via `include_str!`,
-so it applies the exact manifests from the repository — no external files at
-runtime. The target cluster must be able to pull the webhook image
-(`capacity-admission-webhook:latest` by default); for a `kind` cluster, build and
-load it first (see [Container Image](#container-image) above).
+The binary embeds the webhook Kustomize bundle's rendered manifests at compile
+time: the root `build.rs` runs `kustomize build deploy/kustomize/webhook` (or
+`kubectl kustomize` as a fallback) and `include_str!`s the result — so it applies
+the exact manifests from the repository, with no external files at runtime.
+Building `erw-verify` therefore requires `kustomize` (or `kubectl`) on `PATH`.
 
-For a remote registry, point `deploy/deployment.yaml` at your image and rebuild
-`erw-verify` before running.
+The target cluster must be able to pull the webhook image
+(`aectann/emergency-ration-webhook:latest` by default — the bundle default); for a
+`kind` cluster, build and load it first (see [Container Image](#container-image)
+above). For a remote registry, override the bundle image via `.env` (see
+[On-Demand Verification](./docs/erw-verify.md)) and rebuild `erw-verify` before
+running.
 
 ## Testing
 

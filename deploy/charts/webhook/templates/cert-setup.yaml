@@ -1,0 +1,27 @@
+{{- if .Values.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: capacity-admission-self-signed
+  namespace: {{ .Values.namespace }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ template "webhook.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  # Secret consumed by the Deployment (volumeMount /tls).
+  secretName: capacity-admission-webhook-tls
+  dnsNames:
+    - {{ template "webhook.name" . }}
+    - {{ template "webhook.name" . }}.{{ .Values.namespace }}
+    - {{ template "webhook.name" . }}.{{ .Values.namespace }}.svc
+  # The CA is injected into the ValidatingWebhookConfiguration caBundle.
+  isCA: true
+  issuerRef:
+    name: capacity-admission-self-signed
+    kind: Issuer
+{{- end }}

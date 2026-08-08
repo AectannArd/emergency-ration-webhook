@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "equalizer.name" . }}
+  namespace: {{ template "equalizer.namespace" . }}
+  labels:
+    {{- include "equalizer.labels" . | nindent 4 }}
+spec:
+  replicas: 1 # idempotent reconcile; a singleton controller suffices.
+  selector:
+    matchLabels:
+      {{- include "equalizer.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "equalizer.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ template "equalizer.name" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: equalizer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Reconcile interval (contract §4.1). Default 10s.
+            - name: EQUALIZER_RECONCILE_INTERVAL_SECS
+              value: "{{ .Values.reconcile.intervalSeconds }}"
+            - name: RUST_LOG
+              value: info
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]

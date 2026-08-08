@@ -6,7 +6,7 @@
 
 The webhook serves three endpoints across two ports (source:
 [`src/main.rs`](../src/main.rs), [`src/webhook/handler.rs`](../src/webhook/handler.rs),
-[`deploy/deployment.yaml`](../deploy/deployment.yaml)):
+[`deploy/kustomize/webhook/deployment.yaml`](../deploy/kustomize/webhook/deployment.yaml)):
 
 | Endpoint | Protocol | Port | Path | Purpose |
 |----------|----------|------|------|---------|
