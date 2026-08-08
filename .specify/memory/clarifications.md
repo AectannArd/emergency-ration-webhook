@@ -1,3 +1,62 @@
+## Session 2026-08-08 (spec-015: kustomize-helm-manifests)
+
+- Q: How should the Helm chart be distributed as a release artifact?
+  → A: **GitHub Release attachment only** — attach the `.tgz` to the GitHub
+  Release on each tag. No OCI registry, no GitHub Pages chart repo. Users
+  download the `.tgz` and `helm install ./chart.tgz`.
+- Q: How many Helm charts?
+  → A: **Two independent charts** — `emergency-ration-webhook` (webhook) and
+  `emergency-ration-equalizer` (equalizer). Each deploys independently, owns its
+  own namespace and CRDs. Matches the existing two-image split.
+- Q: Where should chart directories live?
+  → A: **Under `deploy/`** — `deploy/charts/webhook/` and
+  `deploy/charts/equalizer/`. Groups everything deploy-related together.
+- Q: How should the Kustomize bundle relate to the existing raw `deploy/*.yaml`?
+  → A: **Kustomize replaces the root manifests.** The new bundle lives in
+  `deploy/kustomize/webhook/` and `deploy/kustomize/equalizer/` (nested per
+  component, mirroring the Helm chart layout) and becomes the single manifest
+  source of truth. The root `deploy/*.yaml` and `deploy/equalizer/*.yaml` files
+  are DELETED once all consumers (`erw-verify`, CI, documentation) are migrated.
+  All processes must be moved to consume the Kustomize output; the raw YAML is
+  removed, not kept as a parallel path.
+
+### Design consequences (carried into specify)
+
+1. **Migration, not addition.** This feature removes the root `deploy/*.yaml`
+   files. The Kustomize-rendered output must produce functionally identical
+   manifests for every current consumer: `erw-verify`'s `include_str!`-embedded
+   manifests, CI's `sed`+`kubectl apply`, and the documented manual deploy
+   steps. A regression in any consumer's behavior is a blocking defect.
+2. **`erw-verify` rework.** `setup.rs` currently embeds 4 root YAML files at
+   compile time via `include_str!`. It must be reworked to either (a) embed the
+   Kustomize base and build at runtime, or (b) embed pre-rendered output. This
+   is the highest-risk consumer — compile-time embedding is incompatible with a
+   Kustomize build step that runs `kustomize build`.
+3. **CI rework.** Both `ci.yml` and `equalizer-e2e.yml` use `sed` to swap the
+   image placeholder in `deploy/deployment.yaml`. Under Kustomize, the image
+   reference is set via `kustomize edit set image` or an overlay patch, then
+   `kustomize build | kubectl apply`. The `ERW_IMAGE_PLACEHOLDER` sed pattern
+   disappears.
+4. **Helm charts wrap Kustomize-compatible manifests.** The chart templates
+   produce the same resources; values expose the image reference, namespace,
+   and budget defaults. Two `.tgz` packages attach to the GitHub Release on tag
+   push.
+5. **Release procedure expansion.** The `publish.yml` workflow currently builds
+   + pushes Docker images. It must additionally package both Helm charts and
+   attach them to the GitHub Release created by the tag push. `ARTIFACTS.md`
+   and Constitution Principle XV must be extended to cover manifest bundles
+   (not just Docker images) as release artifacts.
+6. **Documentation sweep.** Every reference to `deploy/deployment.yaml`,
+   `deploy/rbac.yaml`, `deploy/crds.yaml`, `deploy/webhook-config.yaml` in
+   README, `docs/deployment.md`, `CONTRIBUTING.md`, and CI workflows must be
+   rewritten to the new paths / Helm chart / `kustomize build` invocation.
+7. **Integration tests unaffected.** The `tests/` directory uses mocked
+   apiserver fixtures constructed in-code — it does not consume the deploy
+   manifests directly. No integration test changes are expected, but the spec
+   must assert this (verification-only phase).
+
+---
+
 # Clarifications — Session 2026-07-25
 
 > Produced by `/speckit-clarify` ahead of `/speckit-specify`. No spec file
