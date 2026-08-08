@@ -1,0 +1,21 @@
+# Container image.
+image:
+  repository: aectann/emergency-ration-equalizer
+  tag: latest
+  pullPolicy: Always
+
+# Namespace.
+namespace: capacity-equalizer
+
+# Reconcile interval (EQUALIZER_RECONCILE_INTERVAL_SECS env).
+reconcile:
+  intervalSeconds: 10
+
+# Container resources (matches deploy/equalizer/deployment.yaml defaults).
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi

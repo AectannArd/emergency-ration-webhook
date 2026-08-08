@@ -29,8 +29,9 @@ max_line_length = 100
 [*.toml]
 indent_size = 2
 
-# ---- YAML: Kubernetes manifests, spec-kit config ----
-[*.{yml,yaml}]
+# ---- YAML: Kubernetes manifests, spec-kit config, Helm templates ----
+# *.tpl are Go-templated YAML (Helm); share the YAML indentation rules.
+[*.{yml,yaml,tpl}]
 indent_size = 2
 
 # ---- JSON: spec-kit manifests, tool config ----

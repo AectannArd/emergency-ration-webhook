@@ -1,0 +1,7 @@
+apiVersion: v2
+name: emergency-ration-webhook
+description: A Kubernetes validating admission webhook that enforces a configurable cluster capacity budget for CPU and RAM.
+type: application
+# Stamped at release time from the git tag (research R7).
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"

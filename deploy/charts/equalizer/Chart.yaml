@@ -1,0 +1,7 @@
+apiVersion: v2
+name: emergency-ration-equalizer
+description: Multi-cluster capacity equalizer controller that balances cumulative capacity across a fleet of Kubernetes clusters.
+type: application
+# Stamped at release time from the git tag (research R7).
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
