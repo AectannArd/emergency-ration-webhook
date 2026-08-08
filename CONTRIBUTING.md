@@ -247,5 +247,24 @@ cargo test --test equalizer_bdd
 docker build -f Dockerfile.equalizer -t capacity-equalizer .
 ```
 
+### Cross-cluster verification (E1-E5)
+
+The `erw-verify` tool includes equalizer scenarios (E1-E5) that validate the
+equalizer's cross-cluster orchestration against real clusters. These are
+**opt-in** — they run only when target-cluster kubeconfigs are provided via
+environment variables:
+
+```bash
+# Enable cross-cluster equalizer scenarios:
+ERW_EQUALIZER_TARGET_KUBECONFIG_1=/path/to/target-1.kubeconfig \
+ERW_EQUALIZER_TARGET_KUBECONFIG_2=/path/to/target-2.kubeconfig \
+cargo run --bin erw-verify -- --kubeconfig /path/to/home.kubeconfig
+```
+
+Without these env vars, E1-E5 are skipped (not failed) — standard single-cluster
+`erw-verify` runs are unaffected. The scenarios (E1: all-under, E2: over-
+compensation, E3: unreachable, E4: status shape, E5: cleanup) create kubeconfig
+Secrets, deploy the equalizer, assert budget patches, and clean up.
+
 The full design (CRD schema, algorithm, multi-cluster client construction, RBAC)
 is in [`specs/013-multi-cluster-capacity-equalizer/`](./specs/013-multi-cluster-capacity-equalizer/).
